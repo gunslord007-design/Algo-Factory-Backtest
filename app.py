@@ -18,7 +18,7 @@ from engine.data_loader import (
     fetch_stock_data, get_stocks_by_sector,
     validate_ma_config, SECTOR_MAP, TIMEFRAME_OPTIONS
 )
-from engine.indicators import get_indicator
+from engine.indicators import get_indicator, calculate_rsi
 from engine.strategy import run_backtest
 from engine.analytics import compute_full_analytics
 from engine.optimizer import run_optimization
@@ -124,6 +124,7 @@ interval = TIMEFRAME_OPTIONS[tf_label]["interval"]
 
 st.sidebar.markdown("---")
 st.sidebar.header("2. Strategy Setup")
+strategy_mode = st.sidebar.selectbox("Strategy Mode", ["MA Crossover", "RSI Only", "MA + RSI Combined"], help="Choose how the engine triggers trades. 'MA Crossover' uses only moving averages. 'RSI Only' ignores moving averages. 'MA + RSI' requires BOTH indicators to agree before taking a trade.")
 ma_type = st.sidebar.selectbox("Indicator Type", ["SMA", "EMA", "DEMA", "WMA", "HMA", "VWAP"])
 direction = st.sidebar.radio("Direction", ["Long Only", "Short Only", "Both"], index=0, horizontal=True)
 
@@ -132,7 +133,27 @@ fast_len = col3.number_input("Fast Length", min_value=1, max_value=500, value=9)
 slow_len = col4.number_input("Slow Length", min_value=2, max_value=500, value=21)
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. Capital & Costs")
+st.sidebar.header("3. RSI Settings")
+rsi_len = st.sidebar.number_input("RSI Length", min_value=2, max_value=100, value=14, help="Standard is 14. Lower numbers make RSI highly sensitive and erratic. Higher numbers make it slower and smoother.")
+
+rsi_buy_rule = st.sidebar.selectbox("RSI Buy Logic", [
+    "Crosses Below Oversold", 
+    "Crosses Above Oversold", 
+    "Crosses Above Midline (50)"
+], help="Mean Reversion: Buys exactly when the stock crashes below Oversold (falling knife). Momentum Bounce: Waits for crash, but buys when it bounces ABOVE Oversold (safer). Trend Following: Buys when RSI crosses above 50 (bullish trend).")
+
+rsi_sell_rule = st.sidebar.selectbox("RSI Sell Logic", [
+    "Crosses Above Overbought", 
+    "Crosses Below Overbought", 
+    "Crosses Below Midline (50)"
+], help="Mean Reversion: Sells exactly when crossing above Overbought. Momentum Drop: Waits to cross back below Overbought. Trend Reversal: Sells when RSI drops below 50.")
+
+col5, col6 = st.sidebar.columns(2)
+rsi_lower = col5.slider("Oversold Threshold", 0, 50, 30, help="Standard is 30. Any number below this is considered 'cheap' or oversold.")
+rsi_upper = col6.slider("Overbought Threshold", 50, 100, 70, help="Standard is 70. Any number above this is considered 'expensive' or overbought.")
+
+st.sidebar.markdown("---")
+st.sidebar.header("4. Capital & Costs")
 capital = st.sidebar.number_input("Initial Capital (Rs)", min_value=1000, value=100000, step=10000)
 brokerage = st.sidebar.slider("Brokerage per Trade (Rs)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
 
@@ -160,11 +181,17 @@ if not val_result["ok"]:
 try:
     fast_ma = get_indicator(df, ma_type, fast_len)
     slow_ma = get_indicator(df, ma_type, slow_len)
+    rsi_series = calculate_rsi(df['Close'], rsi_len)
 except Exception as e:
     st.error(f"Error calculating indicators: {e}")
     st.stop()
 
-bt_result = run_backtest(df, fast_ma, slow_ma, direction, capital, brokerage)
+bt_result = run_backtest(
+    df, fast_ma, slow_ma, direction, capital, brokerage, 
+    optimize=False, rsi_series=rsi_series, strategy_mode=strategy_mode,
+    rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
+    rsi_upper=rsi_upper, rsi_lower=rsi_lower
+)
 
 if not bt_result["ok"]:
     st.error(f"**Backtest Error:** {bt_result['error']}")
@@ -211,10 +238,10 @@ with tab1:
     x_str = df.index.strftime('%Y-%m-%d %H:%M') if interval != "1d" else df.index.strftime('%Y-%m-%d')
     
     fig = make_subplots(
-        rows=3, cols=1, 
+        rows=4, cols=1, 
         shared_xaxes=True,
         vertical_spacing=0.03,
-        row_heights=[0.6, 0.15, 0.25]
+        row_heights=[0.5, 0.15, 0.15, 0.2]
     )
 
     # 1. Groww Candlesticks (Solid Green/Red, No Borders)
@@ -246,9 +273,16 @@ with tab1:
     vol_colors = ['#FF5000' if row['Open'] > row['Close'] else '#00B852' for index, row in df.iterrows()]
     fig.add_trace(go.Bar(x=x_str, y=df['Volume'], marker_color=vol_colors, name="Volume", hoverinfo='y', opacity=0.8), row=2, col=1)
 
-    # 4. Equity Curve
-    fig.add_trace(go.Scatter(x=x_str, y=result_df['Portfolio_Value'], name="Strategy Equity", line=dict(color='#3772FF', width=2), fill='tozeroy', fillcolor='rgba(55, 114, 255, 0.1)', hoverinfo='y'), row=3, col=1)
-    fig.add_trace(go.Scatter(x=x_str, y=result_df['BH_Value'], name="Buy & Hold", line=dict(color='#8B949E', width=1.5, dash='dot'), hoverinfo='skip'), row=3, col=1)
+    # 4. RSI Oscillator
+    fig.add_trace(go.Scatter(x=x_str, y=rsi_series, name=f"RSI ({rsi_len})", line=dict(color='#A371F7', width=1.5), hoverinfo='y'), row=3, col=1)
+    fig.add_hline(y=rsi_upper, line=dict(color='#F85149', width=1, dash='dash'), row=3, col=1)
+    fig.add_hline(y=rsi_lower, line=dict(color='#2EA043', width=1, dash='dash'), row=3, col=1)
+    # Add light fill between boundaries (Optional clean styling)
+    fig.add_hrect(y0=rsi_lower, y1=rsi_upper, fillcolor="rgba(163,113,247,0.1)", layer="below", line_width=0, row=3, col=1)
+
+    # 5. Equity Curve
+    fig.add_trace(go.Scatter(x=x_str, y=result_df['Portfolio_Value'], name="Strategy Equity", line=dict(color='#3772FF', width=2), fill='tozeroy', fillcolor='rgba(55, 114, 255, 0.1)', hoverinfo='y'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_str, y=result_df['BH_Value'], name="Buy & Hold", line=dict(color='#8B949E', width=1.5, dash='dot'), hoverinfo='skip'), row=4, col=1)
 
     # Layout & Groww Navigation Mechanics
     fig.update_layout(
@@ -353,8 +387,9 @@ with tab4:
     
     col_op1, col_op2 = st.columns([1, 3])
     with col_op1:
-        st.markdown("Find the optimal Fast/Slow MA parameters for maximum return.")
-        opt_mode = st.radio("Scan Mode", ["Fast Scan (Step 5)", "Deep Scan (Step 1)"])
+        st.markdown("Find the optimal parameters for maximum return.")
+        opt_target = st.radio("Optimization Target", ["Optimize MAs", "Optimize RSI"], help="MA scan keeps RSI fixed. RSI scan keeps MAs fixed.")
+        opt_mode = st.radio("Scan Mode", ["Fast Scan", "Deep Scan"])
         if st.button("Run Grid Search", use_container_width=True):
             mode_str = "fast" if "Fast" in opt_mode else "deep"
             with st.spinner("Running Grid Search..."):
@@ -362,7 +397,12 @@ with tab4:
                 def update_prog(curr, tot):
                     prog_bar.progress(curr / tot)
                     
-                opt_res = run_optimization(df, ma_type, mode_str, capital, brokerage, direction=direction, progress_callback=update_prog)
+                opt_res = run_optimization(
+                    df, ma_type, mode_str, capital, brokerage, direction=direction, progress_callback=update_prog,
+                    opt_target=opt_target, strategy_mode=strategy_mode, rsi_series=rsi_series,
+                    fast_ma=fast_ma, slow_ma=slow_ma, rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
+                    rsi_lower=rsi_lower, rsi_upper=rsi_upper
+                )
                 
                 if opt_res["ok"]:
                     st.session_state['opt_result'] = opt_res
@@ -374,26 +414,32 @@ with tab4:
         if 'opt_result' in st.session_state:
             res = st.session_state['opt_result']
             b = res['best']
-            st.markdown(f"🏆 **Best Combination found:** Fast = `{b['fast']}`, Slow = `{b['slow']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
-            st.info("💡 **How to read:** X-axis is Slow MA, Y-axis is Fast MA. Find the darkest green zones to identify the most robust, profitable settings. Blank space is invalid (Fast > Slow).")
             
-            # Heatmap with dark theme fix and explicit hover text
-            z = res['return_matrix']
-            
-            fig_hm = px.imshow(
-                z,
-                labels=dict(x="Slow Length", y="Fast Length", color="Return %"),
-                x=res['slow_range'],
-                y=res['fast_range'],
-                color_continuous_scale='RdYlGn',
-                aspect="auto"
-            )
-            
-            # Custom Hover Template
-            fig_hm.update_traces(
-                hovertemplate="Fast: %{y} | Slow: %{x}<br><b>Return: %{z:.2f}%</b><extra></extra>",
-                hoverongaps=False # Don't show tooltips for NaN/invalid combos
-            )
+            if res.get('y_range') and len(res['y_range']) > 0 and 'fast' not in b:
+                # New Split Optimizer logic
+                y_label = "Fast Length" if "MAs" in opt_target else "RSI Length"
+                x_label = "Slow Length" if "MAs" in opt_target else "Oversold Threshold"
+                st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                
+                # Heatmap
+                z = res['return_matrix']
+                fig_hm = px.imshow(
+                    z,
+                    labels=dict(x=x_label, y=y_label, color="Return %"),
+                    x=res['x_range'],
+                    y=res['y_range'],
+                    color_continuous_scale='RdYlGn',
+                    aspect="auto"
+                )
+                
+                fig_hm.update_traces(
+                    hovertemplate=f"{y_label}: %{{y}} | {x_label}: %{{x}}<br><b>Return: %{{z:.2f}}%</b><extra></extra>",
+                    hoverongaps=False
+                )
+            else:
+                st.markdown(f"🏆 **Legacy Combination found** ➔ **Return: {b['return']}%**")
+                st.warning("Please re-run the Grid Search to update the heatmap.")
+                fig_hm = go.Figure()
             
             fig_hm.update_layout(
                 height=500, 
