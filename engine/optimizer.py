@@ -39,7 +39,8 @@ def run_optimization(
     initial_capital: float = 100000,
     brokerage_per_trade: float = 0.0,
     direction: str = "Both",
-    progress_callback=None
+    progress_callback=None,
+    **kwargs
 ) -> dict:
     """
     Runs the full heatmap grid search.
@@ -59,9 +60,9 @@ def run_optimization(
             "return_matrix": 2D numpy array of returns,
             "sharpe_matrix": 2D numpy array of Sharpe ratios,
             "trades_matrix": 2D numpy array of trade counts,
-            "fast_range": list of fast MA lengths,
-            "slow_range": list of slow MA lengths,
-            "best": {"fast": int, "slow": int, "return": float, "sharpe": float},
+            "y_range": list of Y-axis values,
+            "x_range": list of X-axis values,
+            "best": {"y_val": int, "x_val": int, "return": float, "sharpe": float},
             "total_combinations": int,
             "error": str or None
         }
@@ -69,67 +70,95 @@ def run_optimization(
     if data is None or data.empty:
         return {"ok": False, "error": "No data provided for optimization."}
 
-    fast_range, slow_range = generate_grid(mode)
+    opt_target = kwargs.get("opt_target", "Optimize MAs")
+    strategy_mode = kwargs.get("strategy_mode", "MA Crossover")
 
-    # Filter out invalid combos where fast >= slow
-    # Pre-filter ranges based on data length
-    data_len = len(data)
-    fast_range = [f for f in fast_range if f < data_len]
-    slow_range = [s for s in slow_range if s < data_len]
+    if opt_target == "Optimize RSI" and strategy_mode == "MA Crossover":
+        return {"ok": False, "error": "Cannot optimize RSI when Strategy Mode is set to 'MA Crossover'. Change Strategy Mode in sidebar first."}
 
-    if len(fast_range) == 0 or len(slow_range) == 0:
-        return {
-            "ok": False,
-            "error": f"Not enough data ({data_len} candles) to run the optimizer. Need at least 55 candles for Fast Scan or 201 for Deep Scan."
-        }
+    # ── GENERATE GRIDS ──
+    if opt_target == "Optimize MAs":
+        y_range, x_range = generate_grid(mode)
+        # Pre-filter based on data length
+        y_range = [f for f in y_range if f < len(data)]
+        x_range = [s for s in x_range if s < len(data)]
+        if not y_range or not x_range:
+            return {"ok": False, "error": "Not enough data for MA Optimization."}
+    else:
+        # RSI Grid: Y = RSI Length, X = Oversold Threshold (Overbought = 100 - Oversold)
+        if mode == "deep":
+            y_range = list(range(2, 31, 1))    # Length: 2 to 30
+            x_range = list(range(10, 46, 1))   # Oversold: 10 to 45
+        else:
+            y_range = list(range(2, 31, 2))    # Length: 2, 4, 6...
+            x_range = list(range(10, 46, 5))   # Oversold: 10, 15, 20...
+            
+    n_y = len(y_range)
+    n_x = len(x_range)
+    return_matrix = np.full((n_y, n_x), np.nan)
+    sharpe_matrix = np.full((n_y, n_x), np.nan)
+    trades_matrix = np.full((n_y, n_x), 0.0)
 
-    # Initialize result matrices
-    n_fast = len(fast_range)
-    n_slow = len(slow_range)
-    return_matrix = np.full((n_fast, n_slow), np.nan)
-    sharpe_matrix = np.full((n_fast, n_slow), np.nan)
-    trades_matrix = np.full((n_fast, n_slow), 0.0)
-
-    # Pre-compute ALL indicator values for every length (cache them)
-    # This is the KEY optimization — calculate each MA length ONCE
-    all_lengths = sorted(set(fast_range + slow_range))
+    # ── CACHING ──
     ma_cache = {}
-    for length in all_lengths:
-        try:
-            ma_cache[length] = get_indicator(data, ma_type, length)
-        except Exception:
-            continue  # Skip lengths that fail
+    rsi_cache = {}
+    
+    if opt_target == "Optimize MAs":
+        all_lengths = sorted(set(y_range + x_range))
+        for length in all_lengths:
+            try:
+                ma_cache[length] = get_indicator(data, ma_type, length)
+            except Exception:
+                continue
+    else:
+        from engine.indicators import calculate_rsi
+        for length in y_range:
+            rsi_cache[length] = calculate_rsi(data['Close'], length)
+        # Fixed MAs for RSI run
+        fast_ma_fixed = kwargs.get('fast_ma')
+        slow_ma_fixed = kwargs.get('slow_ma')
 
+    # Count valid combos
     total_combos = 0
-    for f in fast_range:
-        for s in slow_range:
-            if f < s:
-                total_combos += 1
+    for y in y_range:
+        for x in x_range:
+            if opt_target == "Optimize MAs" and y >= x:
+                continue
+            total_combos += 1
 
     completed = 0
     best_return = -999999
-    best_combo = {"fast": 0, "slow": 0, "return": 0.0, "sharpe": 0.0}
+    best_combo = {"y_val": 0, "x_val": 0, "return": 0.0, "sharpe": 0.0}
 
-    for i, fast_len in enumerate(fast_range):
-        for j, slow_len in enumerate(slow_range):
-            # Skip invalid combos
-            if fast_len >= slow_len:
-                continue
+    for i, y_val in enumerate(y_range):
+        for j, x_val in enumerate(x_range):
+            if opt_target == "Optimize MAs":
+                if y_val >= x_val or y_val not in ma_cache or x_val not in ma_cache:
+                    continue
+                fast_ma = ma_cache[y_val]
+                slow_ma = ma_cache[x_val]
+                rsi_series = kwargs.get('rsi_series')
+                rsi_lower = kwargs.get('rsi_lower', 30)
+                rsi_upper = kwargs.get('rsi_upper', 70)
+            else:
+                fast_ma = fast_ma_fixed
+                slow_ma = slow_ma_fixed
+                rsi_series = rsi_cache[y_val]
+                rsi_lower = x_val
+                rsi_upper = 100 - x_val
 
-            # Skip if either MA was not cached
-            if fast_len not in ma_cache or slow_len not in ma_cache:
-                continue
-
-            fast_ma = ma_cache[fast_len]
-            slow_ma = ma_cache[slow_len]
-
-            # Run backtest using the user-selected direction (not hardcoded)
             bt = run_backtest(
                 data, fast_ma, slow_ma,
                 direction=direction,
                 initial_capital=initial_capital,
                 brokerage_per_trade=brokerage_per_trade,
-                optimize=True
+                optimize=True,
+                rsi_series=rsi_series,
+                strategy_mode=strategy_mode,
+                rsi_buy_rule=kwargs.get("rsi_buy_rule"),
+                rsi_sell_rule=kwargs.get("rsi_sell_rule"),
+                rsi_lower=rsi_lower,
+                rsi_upper=rsi_upper
             )
 
             if bt["ok"] and bt["data"] is not None:
@@ -145,8 +174,8 @@ def run_optimization(
                 if ret > best_return:
                     best_return = ret
                     best_combo = {
-                        "fast": fast_len,
-                        "slow": slow_len,
+                        "y_val": y_val,
+                        "x_val": x_val,
                         "return": round(ret, 2),
                         "sharpe": round(sr, 3),
                         "trades": n_trades
@@ -161,8 +190,8 @@ def run_optimization(
         "return_matrix": return_matrix,
         "sharpe_matrix": sharpe_matrix,
         "trades_matrix": trades_matrix,
-        "fast_range": fast_range,
-        "slow_range": slow_range,
+        "y_range": y_range,
+        "x_range": x_range,
         "best": best_combo,
         "total_combinations": total_combos,
         "error": None

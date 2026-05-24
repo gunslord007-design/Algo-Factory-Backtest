@@ -46,31 +46,42 @@ def detect_crossovers(fast_ma: pd.Series, slow_ma: pd.Series) -> pd.DataFrame:
     }, index=fast_ma.index)
 
 
-def generate_positions(crossovers: pd.DataFrame, direction: str = "Both") -> pd.Series:
+def generate_positions(
+    crossovers: pd.DataFrame, 
+    direction: str = "Both",
+    strategy_mode: str = "MA Crossover"
+) -> pd.Series:
     """
-    Converts crossover signals into a position series using highly optimized vectorized logic.
+    Converts signals into a position series using highly optimized vectorized logic.
 
     Position values:
        1 = Long (bought, holding)
        0 = Flat (no position)
       -1 = Short (sold short, holding)
-
-    Direction modes:
-      "Long Only"  — Only take long positions (golden cross = buy, death cross = exit)
-      "Short Only" — Only take short positions (death cross = sell, golden cross = exit)
-      "Both"       — Take both long and short positions
-
-    Returns: pd.Series of position values (1, 0, or -1)
     """
     gc = crossovers['golden_cross']
     dc = crossovers['death_cross']
+    
+    rsi_buy = crossovers.get('rsi_buy', pd.Series(False, index=crossovers.index))
+    rsi_sell = crossovers.get('rsi_sell', pd.Series(False, index=crossovers.index))
+
+    # Determine master buy/sell triggers based on strategy mode
+    if strategy_mode == "MA Crossover":
+        buy_trigger = gc
+        sell_trigger = dc
+    elif strategy_mode == "RSI Only":
+        buy_trigger = rsi_buy
+        sell_trigger = rsi_sell
+    else:  # "MA + RSI"
+        buy_trigger = gc & rsi_buy
+        sell_trigger = dc | rsi_sell  # Sell if either safety condition hits
 
     if direction == "Long Only":
-        signals = np.where(gc, 1, np.where(dc, 0, np.nan))
+        signals = np.where(buy_trigger, 1, np.where(sell_trigger, 0, np.nan))
     elif direction == "Short Only":
-        signals = np.where(dc, -1, np.where(gc, 0, np.nan))
+        signals = np.where(sell_trigger, -1, np.where(buy_trigger, 0, np.nan))
     else:  # Both directions
-        signals = np.where(gc, 1, np.where(dc, -1, np.nan))
+        signals = np.where(buy_trigger, 1, np.where(sell_trigger, -1, np.nan))
 
     return pd.Series(signals, index=crossovers.index).ffill().fillna(0).astype(int)
 
@@ -123,7 +134,7 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
             total_brokerage = brokerage_per_trade * 2  # Entry + Exit
             net_pnl = gross_pnl - total_brokerage
             position_value = entry_price * shares
-            return_pct = (gross_pnl / position_value) * 100 if position_value != 0 else 0.0
+            return_pct = (net_pnl / position_value) * 100 if position_value != 0 else 0.0
 
             current_capital += net_pnl  # Update running cash for next trade sizing
 
@@ -170,7 +181,7 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
         total_brokerage = brokerage_per_trade * 2
         net_pnl = gross_pnl - total_brokerage
         position_value = entry_price * shares
-        return_pct = (gross_pnl / position_value) * 100 if position_value != 0 else 0.0
+        return_pct = (net_pnl / position_value) * 100 if position_value != 0 else 0.0
 
         current_trade['exit_date'] = last_date
         current_trade['exit_price'] = last_price
@@ -264,7 +275,13 @@ def run_backtest(
     direction: str = "Both",
     initial_capital: float = 100000.0,
     brokerage_per_trade: float = 0.0,
-    optimize: bool = False
+    optimize: bool = False,
+    rsi_series: pd.Series = None,
+    strategy_mode: str = "MA Crossover",
+    rsi_buy_rule: str = "Crosses Below Oversold",
+    rsi_sell_rule: str = "Crosses Above Overbought",
+    rsi_upper: float = 70.0,
+    rsi_lower: float = 30.0
 ) -> dict:
     """
     Master function that orchestrates the entire backtest pipeline.
@@ -317,11 +334,39 @@ def run_backtest(
     else:
         direction_clean = "Both"
 
-    # ── Step 1: Detect crossovers ──
+    # ── Step 1: Detect MA crossovers ──
     crossovers = detect_crossovers(fast_ma, slow_ma)
 
+    # ── Step 1b: Detect RSI Signals ──
+    rsi_buy = pd.Series(False, index=data.index)
+    rsi_sell = pd.Series(False, index=data.index)
+
+    if rsi_series is not None and strategy_mode in ["RSI Only", "MA + RSI"]:
+        prev_rsi = rsi_series.shift(1)
+        curr_rsi = rsi_series
+        
+        # BUY LOGIC (Vectorized)
+        if rsi_buy_rule == "Crosses Below Oversold":
+            rsi_buy = (curr_rsi < rsi_lower) & (prev_rsi >= rsi_lower)
+        elif rsi_buy_rule == "Crosses Above Oversold":
+            rsi_buy = (curr_rsi > rsi_lower) & (prev_rsi <= rsi_lower)
+        elif rsi_buy_rule == "Crosses Above Midline (50)":
+            rsi_buy = (curr_rsi > 50.0) & (prev_rsi <= 50.0)
+            
+        # SELL LOGIC (Vectorized)
+        if rsi_sell_rule == "Crosses Above Overbought":
+            rsi_sell = (curr_rsi > rsi_upper) & (prev_rsi <= rsi_upper)
+        elif rsi_sell_rule == "Crosses Below Overbought":
+            rsi_sell = (curr_rsi < rsi_upper) & (prev_rsi >= rsi_upper)
+        elif rsi_sell_rule == "Crosses Below Midline (50)":
+            rsi_sell = (curr_rsi < 50.0) & (prev_rsi >= 50.0)
+
+    # Append to crossovers DataFrame for clean passing
+    crossovers['rsi_buy'] = rsi_buy
+    crossovers['rsi_sell'] = rsi_sell
+
     # ── Step 2: Generate positions ──
-    positions = generate_positions(crossovers, direction_clean)
+    positions = generate_positions(crossovers, direction_clean, strategy_mode)
 
     # ── Step 3: Build trade log ──
     if optimize:

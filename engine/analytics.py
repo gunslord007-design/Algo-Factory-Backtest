@@ -92,10 +92,10 @@ def max_drawdown_duration(portfolio_values: pd.Series) -> int:
     return max_duration
 
 
-def annualized_volatility(strategy_returns: pd.Series) -> float:
+def annualized_volatility(strategy_returns: pd.Series, bars_per_year: float = 252.0) -> float:
     """
     Annualized standard deviation of returns.
-    Formula: StdDev(daily returns) * sqrt(252)
+    Formula: StdDev(daily returns) * sqrt(bars_per_year)
     """
     if strategy_returns is None or len(strategy_returns) < 2:
         return 0.0
@@ -104,14 +104,14 @@ def annualized_volatility(strategy_returns: pd.Series) -> float:
     if np.isnan(daily_std) or daily_std < 1e-10:
         return 0.0
 
-    return float(daily_std * np.sqrt(TRADING_DAYS_PER_YEAR)) * 100
+    return float(daily_std * np.sqrt(bars_per_year)) * 100
 
 
 # ─────────────────────────────────────────────────────────────
 #  RISK-ADJUSTED RATIOS
 # ─────────────────────────────────────────────────────────────
 
-def sharpe_ratio(strategy_returns: pd.Series) -> float:
+def sharpe_ratio(strategy_returns: pd.Series, bars_per_year: float = 252.0) -> float:
     """
     Sharpe Ratio = (Annualized Return - Risk Free Rate) / Annualized Volatility
     Above 1.0 = Good, Above 2.0 = Excellent, Above 3.0 = Exceptional
@@ -126,15 +126,15 @@ def sharpe_ratio(strategy_returns: pd.Series) -> float:
         return 0.0
 
     # Annualize
-    annual_return = mean_daily * TRADING_DAYS_PER_YEAR
-    annual_std = std_daily * np.sqrt(TRADING_DAYS_PER_YEAR)
-    daily_rf = RISK_FREE_RATE / TRADING_DAYS_PER_YEAR
+    annual_return = mean_daily * bars_per_year
+    annual_std = std_daily * np.sqrt(bars_per_year)
+    daily_rf = RISK_FREE_RATE / bars_per_year
 
-    sharpe = (mean_daily - daily_rf) / std_daily * np.sqrt(TRADING_DAYS_PER_YEAR)
+    sharpe = (mean_daily - daily_rf) / std_daily * np.sqrt(bars_per_year)
     return round(float(sharpe), 3)
 
 
-def sortino_ratio(strategy_returns: pd.Series) -> float:
+def sortino_ratio(strategy_returns: pd.Series, bars_per_year: float = 252.0) -> float:
     """
     Sortino Ratio = (Annualized Return - Risk Free Rate) / Downside Deviation
     Better than Sharpe because it only penalizes DOWNSIDE volatility, not upside.
@@ -143,7 +143,7 @@ def sortino_ratio(strategy_returns: pd.Series) -> float:
         return 0.0
 
     mean_daily = strategy_returns.mean()
-    daily_rf = RISK_FREE_RATE / TRADING_DAYS_PER_YEAR
+    daily_rf = RISK_FREE_RATE / bars_per_year
 
     # Downside deviation: std of ONLY negative returns
     negative_returns = strategy_returns[strategy_returns < 0]
@@ -159,7 +159,7 @@ def sortino_ratio(strategy_returns: pd.Series) -> float:
     if downside_std == 0 or np.isnan(downside_std):
         return 0.0
 
-    sortino = (mean_daily - daily_rf) / downside_std * np.sqrt(TRADING_DAYS_PER_YEAR)
+    sortino = (mean_daily - daily_rf) / downside_std * np.sqrt(bars_per_year)
     return round(float(sortino), 3)
 
 
@@ -279,6 +279,26 @@ def compute_full_analytics(
     if total_days < 1:
         total_days = 1
 
+    # Determine accurate bars per year based on interval
+    if interval == "1m":
+        bpy = 252 * 6.5 * 60
+    elif interval == "2m":
+        bpy = 252 * 6.5 * 30
+    elif interval == "5m":
+        bpy = 252 * 6.5 * 12
+    elif interval == "15m":
+        bpy = 252 * 6.5 * 4
+    elif interval == "30m":
+        bpy = 252 * 6.5 * 2
+    elif interval == "1h":
+        bpy = 252 * 6.5
+    elif interval == "1wk":
+        bpy = 52
+    elif interval == "1mo":
+        bpy = 12
+    else:
+        bpy = 252.0
+
     # ── Return Metrics ──
     strat_total_ret = total_return_pct(initial_capital, final_value)
     bh_total_ret = total_return_pct(initial_capital, bh_final)
@@ -288,11 +308,11 @@ def compute_full_analytics(
     # ── Risk Metrics ──
     mdd = max_drawdown(drawdowns)
     mdd_dur = max_drawdown_duration(portfolio_vals)
-    vol = annualized_volatility(strat_returns)
+    vol = annualized_volatility(strat_returns, bpy)
 
     # ── Risk-Adjusted Ratios ──
-    sr = sharpe_ratio(strat_returns)
-    so = sortino_ratio(strat_returns)
+    sr = sharpe_ratio(strat_returns, bpy)
+    so = sortino_ratio(strat_returns, bpy)
     cr = calmar_ratio(strat_cagr, mdd)
 
     # ── Trade Stats ──

@@ -74,6 +74,25 @@ def calculate_vwap(df: pd.DataFrame, length: int = None) -> pd.Series:
         rolling_vol = df['Volume'].rolling(window=length, min_periods=1).sum()
         return rolling_vp / rolling_vol
 
+def calculate_rsi(series: pd.Series, length: int) -> pd.Series:
+    """Relative Strength Index (RSI) using Wilder's Smoothing"""
+    if len(series) < length:
+        return pd.Series(np.nan, index=series.index)
+        
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).fillna(0)
+    loss = (-delta.where(delta < 0, 0)).fillna(0)
+    
+    # Wilder's smoothing is exactly equivalent to an EMA with alpha = 1/length
+    avg_gain = gain.ewm(alpha=1/length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/length, min_periods=length, adjust=False).mean()
+    
+    # Handle divide by zero
+    rs = avg_gain / avg_loss
+    rsi = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
+    
+    return pd.Series(rsi, index=series.index)
+
 def get_indicator(df: pd.DataFrame, ma_type: str, length: int) -> pd.Series:
     """Master Routing Function"""
     ma_type = ma_type.upper()
