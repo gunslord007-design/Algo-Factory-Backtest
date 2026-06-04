@@ -102,18 +102,20 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
       - tsl_exit_bars: dict mapping bar_index -> exit_price for equity curve sync
     """
     trades = []
-    close = data['Close']
-    high = data['High']
-    low = data['Low']
-    open_prices = data['Open']
     current_capital = initial_capital
-
     tsl_enabled = tsl_pct is not None and tsl_pct > 0
-    true_positions = positions.copy()
     tsl_exit_bars = {}  # {bar_index: exit_price} for equity curve synchronization
 
-    # Detect position changes from raw indicator signals
-    pos_change = positions.diff().fillna(0)
+    # ── EXTRACT ARRAYS FOR C-LEVEL SPEED ──
+    # Doing this avoids millions of Pandas .iloc lookups during deep optimization scans
+    open_arr = data['Open'].values
+    high_arr = data['High'].values
+    low_arr = data['Low'].values
+    close_arr = data['Close'].values
+    dates_arr = data.index.values
+    pos_arr = positions.values
+    pos_change_arr = positions.diff().fillna(0).values
+    true_pos_arr = np.array(positions.values, copy=True)
 
     current_trade = None
     peak = None          # Highest price since LONG entry (for TSL tracking)
@@ -121,21 +123,21 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
     tsl_cooldown = False
     cooldown_direction = 0  # Raw indicator position when TSL fired
 
-    for i in range(len(positions)):
-        change = pos_change.iloc[i]
-        pos = positions.iloc[i]
-        dt = data.index[i]
-        price = open_prices.iloc[i] if execution_mode == "Next Bar Open" else close.iloc[i]
+    for i in range(len(pos_arr)):
+        change = pos_change_arr[i]
+        pos = pos_arr[i]
+        dt = pd.Timestamp(dates_arr[i])
+        price = open_arr[i] if execution_mode == "Next Bar Open" else close_arr[i]
 
         # ── TSL COOLDOWN: Block re-entry until raw indicator signal resets ──
         if tsl_cooldown:
-            true_positions.iloc[i] = 0
+            true_pos_arr[i] = 0
             # Wait for indicator to change away from the direction we were stopped out of
             if pos != cooldown_direction:
                 tsl_cooldown = False
                 # If this bar also has a valid new entry signal, let it fall through
                 if pos != 0 and change != 0:
-                    true_positions.iloc[i] = pos  # Record the new entry position correctly
+                    true_pos_arr[i] = pos  # Record the new entry position correctly
                     pass  # Will be handled by normal entry logic below
                 else:
                     continue
@@ -151,31 +153,31 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
                 old_tsl = peak * (1 - tsl_pct / 100)
                 
                 # STEP 1: Check if Open gapped down past the OLD stop
-                if open_prices.iloc[i] <= old_tsl:
-                    tsl_exit_price = open_prices.iloc[i]
+                if open_arr[i] <= old_tsl:
+                    tsl_exit_price = open_arr[i]
                     tsl_hit = True
                 # STEP 2: Check if intraday low hit the OLD stop
-                elif low.iloc[i] <= old_tsl:
+                elif low_arr[i] <= old_tsl:
                     tsl_exit_price = old_tsl
                     tsl_hit = True
                 else:
                     # STEP 3: Trade survived! Update peak for TOMORROW'S check
-                    peak = max(peak, high.iloc[i])
+                    peak = max(peak, high_arr[i])
 
             else:  # SHORT
                 old_tsl = trough * (1 + tsl_pct / 100)
                 
                 # STEP 1: Check if Open gapped up past the OLD stop
-                if open_prices.iloc[i] >= old_tsl:
-                    tsl_exit_price = open_prices.iloc[i]
+                if open_arr[i] >= old_tsl:
+                    tsl_exit_price = open_arr[i]
                     tsl_hit = True
                 # STEP 2: Check if intraday high hit the OLD stop
-                elif high.iloc[i] >= old_tsl:
+                elif high_arr[i] >= old_tsl:
                     tsl_exit_price = old_tsl
                     tsl_hit = True
                 else:
                     # STEP 3: Trade survived! Update trough for TOMORROW'S check
-                    trough = min(trough, low.iloc[i])
+                    trough = min(trough, low_arr[i])
 
             if tsl_hit:
                 # Close the trade at the TSL exit price
@@ -212,10 +214,10 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
                 trough = None
 
                 # Record for equity curve synchronization
-                tsl_exit_bars[i] = tsl_exit_price
+                tsl_exit_bars[i] = (tsl_exit_price, False)
 
                 # Enter cooldown: stay flat until indicator signal resets
-                true_positions.iloc[i] = 0
+                true_pos_arr[i] = 0
                 tsl_cooldown = True
                 cooldown_direction = pos
                 continue
@@ -274,12 +276,70 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
                     peak = price
                 else:
                     trough = price
+                
+                # ── SAME-DAY TSL CHECK FOR "NEXT BAR OPEN" ──
+                if execution_mode == "Next Bar Open":
+                    tsl_hit = False
+                    tsl_exit_price = None
+                    if pos == 1:
+                        old_tsl = peak * (1 - tsl_pct / 100)
+                        # Intraday drop below Open's calculated stop
+                        if low_arr[i] <= old_tsl:
+                            tsl_exit_price = old_tsl
+                            tsl_hit = True
+                        else:
+                            peak = max(peak, high_arr[i])
+                    else:
+                        old_tsl = trough * (1 + tsl_pct / 100)
+                        # Intraday rise above Open's calculated stop
+                        if high_arr[i] >= old_tsl:
+                            tsl_exit_price = old_tsl
+                            tsl_hit = True
+                        else:
+                            trough = min(trough, low_arr[i])
+                            
+                    if tsl_hit:
+                        # Close the trade instantly on the exact same bar
+                        entry_price = current_trade['entry_price']
+                        shares = current_trade['_shares']
+                        if current_trade['direction'] == 'LONG':
+                            gross_pnl = (tsl_exit_price - entry_price) * shares
+                        else:
+                            gross_pnl = (entry_price - tsl_exit_price) * shares
+                            
+                        total_brokerage = brokerage_per_trade * 2
+                        net_pnl = gross_pnl - total_brokerage
+                        position_value = entry_price * shares
+                        return_pct = (net_pnl / position_value) * 100 if position_value != 0 else 0.0
+
+                        current_capital += net_pnl
+                        current_trade['exit_date'] = dt
+                        current_trade['exit_price'] = round(tsl_exit_price, 2)
+                        current_trade['shares'] = round(shares, 4)
+                        current_trade['gross_pnl'] = round(gross_pnl, 2)
+                        current_trade['brokerage'] = round(total_brokerage, 2)
+                        current_trade['net_pnl'] = round(net_pnl, 2)
+                        current_trade['holding_bars'] = 0
+                        current_trade['return_pct'] = round(return_pct, 2)
+                        current_trade['exit_reason'] = 'TSL'
+
+                        del current_trade['_entry_idx']
+                        del current_trade['_shares']
+                        trades.append(current_trade)
+                        
+                        current_trade = None
+                        peak = None
+                        trough = None
+                        tsl_exit_bars[i] = (tsl_exit_price, True)  # True = Same-Day Exit
+                        true_pos_arr[i] = 0
+                        tsl_cooldown = True
+                        cooldown_direction = pos
 
     # ── Handle open trade at end of data (force close at last price) ──
     if current_trade is not None:
-        last_idx = len(data) - 1
-        last_price = close.iloc[last_idx]
-        last_date = data.index[last_idx]
+        last_idx = len(pos_arr) - 1
+        last_price = close_arr[last_idx]
+        last_date = pd.Timestamp(dates_arr[last_idx])
 
         entry_price = current_trade['entry_price']
         shares = current_trade['_shares']
@@ -309,18 +369,20 @@ def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trad
         del current_trade['_shares']
         trades.append(current_trade)
 
+    true_positions = pd.Series(true_pos_arr, index=data.index)
     return trades, true_positions, tsl_exit_bars
 
 
 def build_equity_curve(
     data: pd.DataFrame,
     positions: pd.Series,
-    initial_capital: float,
+    initial_capital: float = 100000.0,
     brokerage_per_trade: float = 0.0,
     true_positions: pd.Series = None,
     tsl_exit_bars: dict = None,
-    execution_mode: str = "Same Bar Close"
-) -> pd.DataFrame:
+    execution_mode: str = "Same Bar Close",
+    optimize: bool = False
+):
     """
     Builds a complete equity curve with portfolio value, benchmark, and drawdown.
 
@@ -379,12 +441,30 @@ def build_equity_curve(
 
     # ── Sync TSL exit bars: use partial return to exact exit price ──
     if tsl_exit_bars:
-        for bar_idx, exit_price in tsl_exit_bars.items():
-            if bar_idx > 0:
-                prev_close = close.iloc[bar_idx - 1]
-                if prev_close != 0:
-                    partial_return = (exit_price - prev_close) / prev_close
-                    strategy_returns.iloc[bar_idx] = partial_return * active_position.iloc[bar_idx]
+        for bar_idx, exit_data in tsl_exit_bars.items():
+            if isinstance(exit_data, tuple):
+                exit_price, is_sameday = exit_data
+            else:
+                exit_price = exit_data
+                is_sameday = False
+                
+            if is_sameday and execution_mode == "Next Bar Open":
+                # Special Case: Entered and exited on the EXACT same day.
+                # The return is strictly intraday from the Open price.
+                open_px = data['Open'].iloc[bar_idx]
+                if open_px != 0:
+                    partial_return = (exit_price - open_px) / open_px
+                    original_pos = positions.iloc[bar_idx]
+                    strategy_returns.iloc[bar_idx] = partial_return * original_pos
+            else:
+                if bar_idx > 0:
+                    prev_close = close.iloc[bar_idx - 1]
+                    if prev_close != 0:
+                        partial_return = (exit_price - prev_close) / prev_close
+                        # Use PREVIOUS bar's position. In NBO mode active_position[bar_idx] = 0
+                        # because TSL zeroed it, which would erase the exit-day PnL entirely.
+                        old_pos = effective_positions.iloc[bar_idx - 1]
+                        strategy_returns.iloc[bar_idx] = partial_return * old_pos
 
     # ── Deduct brokerage at position changes ──
     # A reversal (Long→Short or Short→Long) is a magnitude-2 change — charge double brokerage.
@@ -399,6 +479,9 @@ def build_equity_curve(
     # ── Equity curve (cumulative product of 1 + returns) ──
     equity_curve = (1 + strategy_returns).cumprod()
     portfolio_value = equity_curve * initial_capital
+
+    if optimize:
+        return {"Strategy_Return": strategy_returns, "Portfolio_Value": portfolio_value}
 
     # ── Buy & Hold benchmark ──
     bh_returns = asset_returns.copy()
@@ -437,7 +520,8 @@ def run_backtest(
     rsi_lower: float = 30.0,
     tsl_enabled: bool = False,
     tsl_pct: float = None,
-    execution_mode: str = "Same Bar Close"
+    execution_mode: str = "Same Bar Close",
+    precomputed_positions: pd.Series = None
 ) -> dict:
     """
     Master function that orchestrates the entire backtest pipeline.
@@ -490,43 +574,46 @@ def run_backtest(
     else:
         direction_clean = "Both"
 
-    # ── Step 1: Detect MA crossovers ──
-    crossovers = detect_crossovers(fast_ma, slow_ma)
+    if precomputed_positions is not None:
+        positions = precomputed_positions
+    else:
+        # ── Step 1: Detect MA crossovers ──
+        crossovers = detect_crossovers(fast_ma, slow_ma)
 
-    # ── Step 1b: Detect RSI Signals ──
-    rsi_buy = pd.Series(False, index=data.index)
-    rsi_sell = pd.Series(False, index=data.index)
+        # ── Step 1b: Detect RSI Signals ──
+        rsi_buy = pd.Series(False, index=data.index)
+        rsi_sell = pd.Series(False, index=data.index)
 
-    if rsi_series is not None and strategy_mode in ["RSI Only", "MA + RSI"]:
-        prev_rsi = rsi_series.shift(1)
-        curr_rsi = rsi_series
-        
-        # BUY LOGIC (Vectorized)
-        if rsi_buy_rule == "Crosses Below Oversold":
-            rsi_buy = (curr_rsi < rsi_lower) & (prev_rsi >= rsi_lower)
-        elif rsi_buy_rule == "Crosses Above Oversold":
-            rsi_buy = (curr_rsi > rsi_lower) & (prev_rsi <= rsi_lower)
-        elif rsi_buy_rule == "Crosses Above Midline (50)":
-            rsi_buy = (curr_rsi > 50.0) & (prev_rsi <= 50.0)
+        if rsi_series is not None and strategy_mode in ["RSI Only", "MA + RSI"]:
+            prev_rsi = rsi_series.shift(1)
+            curr_rsi = rsi_series
             
-        # SELL LOGIC (Vectorized)
-        if rsi_sell_rule == "Crosses Above Overbought":
-            rsi_sell = (curr_rsi > rsi_upper) & (prev_rsi <= rsi_upper)
-        elif rsi_sell_rule == "Crosses Below Overbought":
-            rsi_sell = (curr_rsi < rsi_upper) & (prev_rsi >= rsi_upper)
-        elif rsi_sell_rule == "Crosses Below Midline (50)":
-            rsi_sell = (curr_rsi < 50.0) & (prev_rsi >= 50.0)
+            # BUY LOGIC (Vectorized)
+            if rsi_buy_rule == "Crosses Below Oversold":
+                rsi_buy = (curr_rsi < rsi_lower) & (prev_rsi >= rsi_lower)
+            elif rsi_buy_rule == "Crosses Above Oversold":
+                rsi_buy = (curr_rsi > rsi_lower) & (prev_rsi <= rsi_lower)
+            elif rsi_buy_rule == "Crosses Above Midline (50)":
+                rsi_buy = (curr_rsi > 50.0) & (prev_rsi <= 50.0)
+                
+            # SELL LOGIC (Vectorized)
+            if rsi_sell_rule == "Crosses Above Overbought":
+                rsi_sell = (curr_rsi > rsi_upper) & (prev_rsi <= rsi_upper)
+            elif rsi_sell_rule == "Crosses Below Overbought":
+                rsi_sell = (curr_rsi < rsi_upper) & (prev_rsi >= rsi_upper)
+            elif rsi_sell_rule == "Crosses Below Midline (50)":
+                rsi_sell = (curr_rsi < 50.0) & (prev_rsi >= 50.0)
 
-    # Append to crossovers DataFrame for clean passing
-    crossovers['rsi_buy'] = rsi_buy
-    crossovers['rsi_sell'] = rsi_sell
+        # Append to crossovers DataFrame for clean passing
+        crossovers['rsi_buy'] = rsi_buy
+        crossovers['rsi_sell'] = rsi_sell
 
-    # ── Step 2: Generate positions ──
-    positions = generate_positions(crossovers, direction_clean, strategy_mode)
+        # ── Step 2: Generate positions ──
+        positions = generate_positions(crossovers, direction_clean, strategy_mode)
 
-    # ── Next Bar Open: delay all position changes by 1 bar ──
-    if execution_mode == "Next Bar Open":
-        positions = positions.shift(1).fillna(0).astype(int)
+        # ── Next Bar Open: delay all position changes by 1 bar ──
+        if execution_mode == "Next Bar Open":
+            positions = positions.shift(1).fillna(0).astype(int)
 
     # ── Step 3: Build trade log ──
     true_positions = None
@@ -540,7 +627,11 @@ def run_backtest(
         trades, true_positions, tsl_exit_bars = build_trade_log(data, positions, brokerage_per_trade, initial_capital, tsl_pct=tsl_pct_val, execution_mode=execution_mode)
 
     # ── Step 4: Build equity curve ──
-    result_data = build_equity_curve(data, positions, initial_capital, brokerage_per_trade, true_positions=true_positions, tsl_exit_bars=tsl_exit_bars, execution_mode=execution_mode)
+    result_data = build_equity_curve(
+        data, positions, initial_capital, brokerage_per_trade, 
+        true_positions=true_positions, tsl_exit_bars=tsl_exit_bars, 
+        execution_mode=execution_mode, optimize=optimize
+    )
 
     return {
         "ok": True,

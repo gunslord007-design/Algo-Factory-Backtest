@@ -431,6 +431,7 @@ with tab4:
             opt_options.append("Optimize RSI")
         if tsl_enabled:
             opt_options.append("Optimize Strategy + TSL (3D)")
+            opt_options.append("Optimize TSL Only (1D)")
             
         opt_target = st.radio("Optimization Target", opt_options, help="MA scan keeps RSI fixed. RSI scan keeps MAs fixed. 3D scan optimizes Strategy + TSL simultaneously.")
         opt_mode = st.radio("Scan Mode", ["Fast Scan", "Deep Scan"])
@@ -470,35 +471,50 @@ with tab4:
             if res.get('y_range') and len(res['y_range']) > 0 and 'fast' not in b:
                 # New Split Optimizer logic
                 base_opt = res.get('base_opt', 'Optimize MAs')
-                y_label = "Fast Length" if "MAs" in base_opt else "RSI Length"
-                x_label = "Slow Length" if "MAs" in base_opt else "Oversold Threshold"
                 
-                is_3d_result = ('z_range' in res and len(res['z_range']) > 1)
-                
-                if is_3d_result:
-                    st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}`, TSL = `{b['z_val']}%` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
-                    st.caption(f"Displaying 2D Heatmap slice locked at optimal TSL = {b['z_val']}%")
-                    
-                    z_idx = res['z_range'].index(b['z_val'])
-                    z = res['return_matrix'][:, :, z_idx]
+                if base_opt == "Optimize TSL Only (1D)":
+                    st.markdown(f"🏆 **Best Combination found:** TSL = `{b['z_val']}%` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                    fig_hm = px.line(
+                        x=res['z_range'],
+                        y=res['return_matrix'],
+                        labels={"x": "TSL Percentage (%)", "y": "Total Return (%)"}
+                    )
+                    fig_hm.update_traces(
+                        hovertemplate="TSL: %{x}%<br>Return: %{y:.2f}%<extra></extra>",
+                        line=dict(color="#00B852", width=3),
+                        fill='tozeroy',
+                        fillcolor='rgba(0, 184, 82, 0.1)'
+                    )
                 else:
-                    st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
-                    z = res['return_matrix']
-                
-                # Heatmap
-                fig_hm = px.imshow(
-                    z,
-                    labels=dict(x=x_label, y=y_label, color="Return %"),
-                    x=res['x_range'],
-                    y=res['y_range'],
-                    color_continuous_scale='RdYlGn',
-                    aspect="auto"
-                )
-                
-                fig_hm.update_traces(
-                    hovertemplate=f"{y_label}: %{{y}} | {x_label}: %{{x}}<br><b>Return: %{{z:.2f}}%</b><extra></extra>",
-                    hoverongaps=False
-                )
+                    y_label = "Fast Length" if "MAs" in base_opt else "RSI Length"
+                    x_label = "Slow Length" if "MAs" in base_opt else "Oversold Threshold"
+                    
+                    is_3d_result = ('z_range' in res and len(res['z_range']) > 1)
+                    
+                    if is_3d_result:
+                        st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}`, TSL = `{b['z_val']}%` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                        st.caption(f"Displaying 2D Heatmap slice locked at optimal TSL = {b['z_val']}%")
+                        
+                        z_idx = res['z_range'].index(b['z_val'])
+                        z = res['return_matrix'][:, :, z_idx]
+                    else:
+                        st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                        z = res['return_matrix']
+                    
+                    # Heatmap
+                    fig_hm = px.imshow(
+                        z,
+                        labels=dict(x=x_label, y=y_label, color="Return %"),
+                        x=res['x_range'],
+                        y=res['y_range'],
+                        color_continuous_scale='RdYlGn',
+                        aspect="auto"
+                    )
+                    
+                    fig_hm.update_traces(
+                        hovertemplate=f"{y_label}: %{{y}} | {x_label}: %{{x}}<br><b>Return: %{{z:.2f}}%</b><extra></extra>",
+                        hoverongaps=False
+                    )
             else:
                 st.markdown(f"🏆 **Legacy Combination found** ➔ **Return: {b['return']}%**")
                 st.warning("Please re-run the Grid Search to update the heatmap.")
