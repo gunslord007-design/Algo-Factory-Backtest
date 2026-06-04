@@ -125,37 +125,58 @@ interval = TIMEFRAME_OPTIONS[tf_label]["interval"]
 st.sidebar.markdown("---")
 st.sidebar.header("2. Strategy Setup")
 strategy_mode = st.sidebar.selectbox("Strategy Mode", ["MA Crossover", "RSI Only", "MA + RSI Combined"], help="Choose how the engine triggers trades. 'MA Crossover' uses only moving averages. 'RSI Only' ignores moving averages. 'MA + RSI' requires BOTH indicators to agree before taking a trade.")
-ma_type = st.sidebar.selectbox("Indicator Type", ["SMA", "EMA", "DEMA", "WMA", "HMA", "VWAP"])
 direction = st.sidebar.radio("Direction", ["Long Only", "Short Only", "Both"], index=0, horizontal=True)
 
-col3, col4 = st.sidebar.columns(2)
-fast_len = col3.number_input("Fast Length", min_value=1, max_value=500, value=9)
-slow_len = col4.number_input("Slow Length", min_value=2, max_value=500, value=21)
+if "MA" in strategy_mode:
+    ma_type = st.sidebar.selectbox("Indicator Type", ["SMA", "EMA", "DEMA", "WMA", "HMA", "VWAP"])
+    col3, col4 = st.sidebar.columns(2)
+    fast_len = col3.number_input("Fast Length", min_value=1, max_value=500, value=9)
+    slow_len = col4.number_input("Slow Length", min_value=2, max_value=500, value=21)
+else:
+    ma_type = "SMA"
+    fast_len = 9
+    slow_len = 21
+
+if "RSI" in strategy_mode:
+    st.sidebar.markdown("---")
+    st.sidebar.header("3. RSI Settings")
+    rsi_len = st.sidebar.number_input("RSI Length", min_value=2, max_value=100, value=14, help="Standard is 14. Lower numbers make RSI highly sensitive and erratic. Higher numbers make it slower and smoother.")
+
+    rsi_buy_rule = st.sidebar.selectbox("RSI Buy Logic", [
+        "Crosses Below Oversold", 
+        "Crosses Above Oversold", 
+        "Crosses Above Midline (50)"
+    ], help="Mean Reversion: Buys exactly when the stock crashes below Oversold (falling knife). Momentum Bounce: Waits for crash, but buys when it bounces ABOVE Oversold (safer). Trend Following: Buys when RSI crosses above 50 (bullish trend).")
+
+    rsi_sell_rule = st.sidebar.selectbox("RSI Sell Logic", [
+        "Crosses Above Overbought", 
+        "Crosses Below Overbought", 
+        "Crosses Below Midline (50)"
+    ], help="Mean Reversion: Sells exactly when crossing above Overbought. Momentum Drop: Waits to cross back below Overbought. Trend Reversal: Sells when RSI drops below 50.")
+
+    col5, col6 = st.sidebar.columns(2)
+    rsi_lower = col5.slider("Oversold Threshold", 0, 50, 30, help="Standard is 30. Any number below this is considered 'cheap' or oversold.")
+    rsi_upper = col6.slider("Overbought Threshold", 50, 100, 70, help="Standard is 70. Any number above this is considered 'expensive' or overbought.")
+else:
+    rsi_len = 14
+    rsi_buy_rule = "Crosses Below Oversold"
+    rsi_sell_rule = "Crosses Above Overbought"
+    rsi_lower = 30
+    rsi_upper = 70
 
 st.sidebar.markdown("---")
-st.sidebar.header("3. RSI Settings")
-rsi_len = st.sidebar.number_input("RSI Length", min_value=2, max_value=100, value=14, help="Standard is 14. Lower numbers make RSI highly sensitive and erratic. Higher numbers make it slower and smoother.")
-
-rsi_buy_rule = st.sidebar.selectbox("RSI Buy Logic", [
-    "Crosses Below Oversold", 
-    "Crosses Above Oversold", 
-    "Crosses Above Midline (50)"
-], help="Mean Reversion: Buys exactly when the stock crashes below Oversold (falling knife). Momentum Bounce: Waits for crash, but buys when it bounces ABOVE Oversold (safer). Trend Following: Buys when RSI crosses above 50 (bullish trend).")
-
-rsi_sell_rule = st.sidebar.selectbox("RSI Sell Logic", [
-    "Crosses Above Overbought", 
-    "Crosses Below Overbought", 
-    "Crosses Below Midline (50)"
-], help="Mean Reversion: Sells exactly when crossing above Overbought. Momentum Drop: Waits to cross back below Overbought. Trend Reversal: Sells when RSI drops below 50.")
-
-col5, col6 = st.sidebar.columns(2)
-rsi_lower = col5.slider("Oversold Threshold", 0, 50, 30, help="Standard is 30. Any number below this is considered 'cheap' or oversold.")
-rsi_upper = col6.slider("Overbought Threshold", 50, 100, 70, help="Standard is 70. Any number above this is considered 'expensive' or overbought.")
+st.sidebar.header("4. Risk Management (TSL)")
+tsl_enabled = st.sidebar.checkbox("Enable Trailing Stop-Loss", value=False, help="Overrides indicator signals if the asset price drops (or rises) by the specified percentage from its peak/trough.")
+tsl_pct = st.sidebar.number_input("TSL Percentage (%)", min_value=0.1, max_value=50.0, value=4.0, step=0.1, help="The trailing percentage drop/rise required to trigger the stop loss.")
 
 st.sidebar.markdown("---")
-st.sidebar.header("4. Capital & Costs")
+st.sidebar.header("5. Capital & Costs")
 capital = st.sidebar.number_input("Initial Capital (Rs)", min_value=1000, value=100000, step=10000)
 brokerage = st.sidebar.slider("Brokerage per Trade (Rs)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
+
+st.sidebar.markdown("---")
+st.sidebar.header("6. Execution Settings")
+execution_mode = st.sidebar.radio("Execution Timing", ["Same Bar Close", "Next Bar Open"], index=0, horizontal=True, help="'Same Bar Close': Execute at the close of the signal candle. 'Next Bar Open': Execute at the open of the NEXT candle (more realistic for live trading).")
 
 
 # ── MAIN TERMINAL ──
@@ -179,9 +200,17 @@ if not val_result["ok"]:
     st.stop()
 
 try:
-    fast_ma = get_indicator(df, ma_type, fast_len)
-    slow_ma = get_indicator(df, ma_type, slow_len)
-    rsi_series = calculate_rsi(df['Close'], rsi_len)
+    if "MA" in strategy_mode:
+        fast_ma = get_indicator(df, ma_type, fast_len)
+        slow_ma = get_indicator(df, ma_type, slow_len)
+    else:
+        fast_ma = pd.Series(0.0, index=df.index)
+        slow_ma = pd.Series(0.0, index=df.index)
+
+    if "RSI" in strategy_mode:
+        rsi_series = calculate_rsi(df['Close'], rsi_len)
+    else:
+        rsi_series = pd.Series(50.0, index=df.index)
 except Exception as e:
     st.error(f"Error calculating indicators: {e}")
     st.stop()
@@ -190,7 +219,9 @@ bt_result = run_backtest(
     df, fast_ma, slow_ma, direction, capital, brokerage, 
     optimize=False, rsi_series=rsi_series, strategy_mode=strategy_mode,
     rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
-    rsi_upper=rsi_upper, rsi_lower=rsi_lower
+    rsi_upper=rsi_upper, rsi_lower=rsi_lower,
+    tsl_enabled=tsl_enabled, tsl_pct=tsl_pct,
+    execution_mode=execution_mode
 )
 
 if not bt_result["ok"]:
@@ -267,7 +298,11 @@ with tab1:
         else:
             fig.add_trace(go.Scatter(x=[t_date], y=[t['entry_price']], mode='markers', marker=dict(symbol='triangle-down', size=14, color='#FF5000', line=dict(color='white', width=1)), name='Short Entry', hoverinfo='skip'), row=1, col=1)
             
-        fig.add_trace(go.Scatter(x=[e_date], y=[t['exit_price']], mode='markers', marker=dict(symbol='x', size=10, color='#FFFFFF'), name='Exit', hoverinfo='skip'), row=1, col=1)
+        exit_reason = t.get('exit_reason', 'Signal')
+        if exit_reason == 'TSL':
+            fig.add_trace(go.Scatter(x=[e_date], y=[t['exit_price']], mode='markers', marker=dict(symbol='x', size=12, color='#F85149', line=dict(color='#FFFFFF', width=1)), name='TSL Exit', hovertemplate='TSL Exit: %{y}<extra></extra>'), row=1, col=1)
+        else:
+            fig.add_trace(go.Scatter(x=[e_date], y=[t['exit_price']], mode='markers', marker=dict(symbol='x', size=10, color='#FFFFFF'), name='Exit', hoverinfo='skip'), row=1, col=1)
 
     # 3. Volume (Blended Colors)
     vol_colors = ['#FF5000' if row['Open'] > row['Close'] else '#00B852' for index, row in df.iterrows()]
@@ -370,7 +405,7 @@ with tab3:
             st.download_button("📄 Download PDF Tearsheet", data=pdf_bytes_clean, file_name=f"{ticker}_Report.pdf", mime="application/pdf", use_container_width=True)
 
         tdf = pd.DataFrame(trades)
-        display_cols = ['direction', 'entry_date', 'entry_price', 'exit_date', 'exit_price', 'brokerage', 'net_pnl', 'return_pct', 'holding_bars']
+        display_cols = ['direction', 'entry_date', 'entry_price', 'exit_date', 'exit_price', 'exit_reason', 'brokerage', 'net_pnl', 'return_pct', 'holding_bars']
         exist_cols = [c for c in display_cols if c in tdf.columns]
         format_dict = {'entry_price': 'Rs {:.2f}', 'exit_price': 'Rs {:.2f}', 'brokerage': 'Rs {:.2f}', 'net_pnl': 'Rs {:.2f}', 'return_pct': '{:.2f}%'}
         
@@ -388,8 +423,23 @@ with tab4:
     col_op1, col_op2 = st.columns([1, 3])
     with col_op1:
         st.markdown("Find the optimal parameters for maximum return.")
-        opt_target = st.radio("Optimization Target", ["Optimize MAs", "Optimize RSI"], help="MA scan keeps RSI fixed. RSI scan keeps MAs fixed.")
+        # Dynamic opt_target based on strategy_mode
+        opt_options = []
+        if "MA" in strategy_mode:
+            opt_options.append("Optimize MAs")
+        if "RSI" in strategy_mode:
+            opt_options.append("Optimize RSI")
+        if tsl_enabled:
+            opt_options.append("Optimize Strategy + TSL (3D)")
+            
+        opt_target = st.radio("Optimization Target", opt_options, help="MA scan keeps RSI fixed. RSI scan keeps MAs fixed. 3D scan optimizes Strategy + TSL simultaneously.")
         opt_mode = st.radio("Scan Mode", ["Fast Scan", "Deep Scan"])
+        
+        # Clear session state if it doesn't match the current strategy_mode
+        if 'opt_strategy_mode' not in st.session_state or st.session_state['opt_strategy_mode'] != strategy_mode:
+            if 'opt_result' in st.session_state:
+                del st.session_state['opt_result']
+            st.session_state['opt_strategy_mode'] = strategy_mode
         if st.button("Run Grid Search", use_container_width=True):
             mode_str = "fast" if "Fast" in opt_mode else "deep"
             with st.spinner("Running Grid Search..."):
@@ -401,7 +451,9 @@ with tab4:
                     df, ma_type, mode_str, capital, brokerage, direction=direction, progress_callback=update_prog,
                     opt_target=opt_target, strategy_mode=strategy_mode, rsi_series=rsi_series,
                     fast_ma=fast_ma, slow_ma=slow_ma, rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
-                    rsi_lower=rsi_lower, rsi_upper=rsi_upper
+                    rsi_lower=rsi_lower, rsi_upper=rsi_upper,
+                    tsl_enabled=tsl_enabled, tsl_pct=tsl_pct,
+                    execution_mode=execution_mode
                 )
                 
                 if opt_res["ok"]:
@@ -417,12 +469,23 @@ with tab4:
             
             if res.get('y_range') and len(res['y_range']) > 0 and 'fast' not in b:
                 # New Split Optimizer logic
-                y_label = "Fast Length" if "MAs" in opt_target else "RSI Length"
-                x_label = "Slow Length" if "MAs" in opt_target else "Oversold Threshold"
-                st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                base_opt = res.get('base_opt', 'Optimize MAs')
+                y_label = "Fast Length" if "MAs" in base_opt else "RSI Length"
+                x_label = "Slow Length" if "MAs" in base_opt else "Oversold Threshold"
+                
+                is_3d_result = ('z_range' in res and len(res['z_range']) > 1)
+                
+                if is_3d_result:
+                    st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}`, TSL = `{b['z_val']}%` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                    st.caption(f"Displaying 2D Heatmap slice locked at optimal TSL = {b['z_val']}%")
+                    
+                    z_idx = res['z_range'].index(b['z_val'])
+                    z = res['return_matrix'][:, :, z_idx]
+                else:
+                    st.markdown(f"🏆 **Best Combination found:** {y_label} = `{b['y_val']}`, {x_label} = `{b['x_val']}` ➔ **Return: {b['return']}%** (Sharpe: {b['sharpe']})")
+                    z = res['return_matrix']
                 
                 # Heatmap
-                z = res['return_matrix']
                 fig_hm = px.imshow(
                     z,
                     labels=dict(x=x_label, y=y_label, color="Return %"),
