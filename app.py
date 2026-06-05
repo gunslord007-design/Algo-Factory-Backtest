@@ -170,12 +170,19 @@ tsl_enabled = st.sidebar.checkbox("Enable Trailing Stop-Loss", value=False, help
 tsl_pct = st.sidebar.number_input("TSL Percentage (%)", min_value=0.1, max_value=50.0, value=4.0, step=0.1, help="The trailing percentage drop/rise required to trigger the stop loss.")
 
 st.sidebar.markdown("---")
-st.sidebar.header("5. Capital & Costs")
+st.sidebar.header("5. Volume Filter")
+vol_filter_enabled = st.sidebar.checkbox("Enable Relative Volume (RVOL) Filter", value=False, help="Only takes trades if current volume is strictly higher than the moving average volume.")
+col7, col8 = st.sidebar.columns(2)
+vol_lookback = col7.number_input("RVOL Lookback", min_value=5, max_value=100, value=20, help="The period used to calculate the average volume.")
+vol_threshold = col8.number_input("Min RVOL", min_value=0.5, max_value=5.0, value=1.5, step=0.1, help="e.g. 1.5 means volume must be 150% of the average volume to take a trade.")
+
+st.sidebar.markdown("---")
+st.sidebar.header("6. Capital & Costs")
 capital = st.sidebar.number_input("Initial Capital (Rs)", min_value=1000, value=100000, step=10000)
 brokerage = st.sidebar.slider("Brokerage per Trade (Rs)", min_value=0.0, max_value=100.0, value=20.0, step=1.0)
 
 st.sidebar.markdown("---")
-st.sidebar.header("6. Execution Settings")
+st.sidebar.header("7. Execution Settings")
 execution_mode = st.sidebar.radio("Execution Timing", ["Same Bar Close", "Next Bar Open"], index=0, horizontal=True, help="'Same Bar Close': Execute at the close of the signal candle. 'Next Bar Open': Execute at the open of the NEXT candle (more realistic for live trading).")
 
 
@@ -221,7 +228,11 @@ bt_result = run_backtest(
     rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
     rsi_upper=rsi_upper, rsi_lower=rsi_lower,
     tsl_enabled=tsl_enabled, tsl_pct=tsl_pct,
-    execution_mode=execution_mode
+    execution_mode=execution_mode,
+    vol_filter_enabled=vol_filter_enabled,
+    vol_lookback=vol_lookback,
+    vol_threshold=vol_threshold,
+    max_lookback=max(fast_len, slow_len)
 )
 
 if not bt_result["ok"]:
@@ -234,7 +245,7 @@ trades = bt_result["trades"]
 analytics = compute_full_analytics(result_df, trades, capital, interval)
 
 # ── TABBED ARCHITECTURE ──
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Terminal", "📈 Deep Analytics", "📋 Trade Book", "⚡ Optimizer"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Terminal", "📈 Deep Analytics", "📋 Trade Book", "⚡ Optimizer", "🔮 Future Test"])
 
 def metric_card(title, value, color_class=""):
     return f"""
@@ -263,10 +274,17 @@ with tab1:
     c5.markdown(metric_card("Win Rate", f"{trd['win_rate']:.1f}%"), unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
+    
+    chart_type = st.radio(
+        "Chart Display Style",
+        ["Candlestick", "Line", "Area", "OHLC"],
+        index=0,
+        horizontal=True,
+        label_visibility="collapsed"
+    )
 
     # ── GROWW-STYLE CHART OVERHAUL ──
-    # Convert dates to strings for categorical X-axis (destroys all gaps: weekends, holidays, overnight)
-    x_str = df.index.strftime('%Y-%m-%d %H:%M') if interval != "1d" else df.index.strftime('%Y-%m-%d')
+    x_ax = df.index
     
     fig = make_subplots(
         rows=4, cols=1, 
@@ -275,23 +293,31 @@ with tab1:
         row_heights=[0.5, 0.15, 0.15, 0.2]
     )
 
-    # 1. Groww Candlesticks (Solid Green/Red, No Borders)
-    fig.add_trace(go.Candlestick(
-        x=x_str, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
-        name="Price", 
-        increasing_line_color='#00B852', increasing_fillcolor='#00B852',
-        decreasing_line_color='#FF5000', decreasing_fillcolor='#FF5000',
-        hoverinfo='x+y'
-    ), row=1, col=1)
+    # 1. Main Price Trace
+    if chart_type == "Candlestick":
+        fig.add_trace(go.Candlestick(
+            x=x_ax, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price", 
+            increasing_line_color='#00B852', increasing_fillcolor='#00B852',
+            decreasing_line_color='#FF5000', decreasing_fillcolor='#FF5000', hoverinfo='x+y'
+        ), row=1, col=1)
+    elif chart_type == "Line":
+        fig.add_trace(go.Scatter(x=x_ax, y=df['Close'], mode='lines', name='Price', line=dict(color='#E6EDF3', width=2), hoverinfo='x+y'), row=1, col=1)
+    elif chart_type == "Area":
+        fig.add_trace(go.Scatter(x=x_ax, y=df['Close'], mode='lines', name='Price', line=dict(color='#00B852', width=2), fill='tozeroy', fillcolor='rgba(0, 184, 82, 0.1)', hoverinfo='x+y'), row=1, col=1)
+    elif chart_type == "OHLC":
+        fig.add_trace(go.Ohlc(
+            x=x_ax, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name="Price",
+            increasing_line_color='#00B852', decreasing_line_color='#FF5000', hoverinfo='x+y'
+        ), row=1, col=1)
 
     # Moving Averages
-    fig.add_trace(go.Scatter(x=x_str, y=fast_ma, name=f"Fast {ma_type}", line=dict(color='#3772FF', width=1.5), hoverinfo='y'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_str, y=slow_ma, name=f"Slow {ma_type}", line=dict(color='#F0B90B', width=1.5), hoverinfo='y'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_ax, y=fast_ma, name=f"Fast {ma_type}", line=dict(color='#3772FF', width=1.5), hoverinfo='y'), row=1, col=1)
+    fig.add_trace(go.Scatter(x=x_ax, y=slow_ma, name=f"Slow {ma_type}", line=dict(color='#F0B90B', width=1.5), hoverinfo='y'), row=1, col=1)
 
     # 2. Trade Markers (Precise Arrows)
     for t in trades:
-        t_date = t['entry_date'].strftime('%Y-%m-%d %H:%M') if interval != "1d" else t['entry_date'].strftime('%Y-%m-%d')
-        e_date = t['exit_date'].strftime('%Y-%m-%d %H:%M') if interval != "1d" else t['exit_date'].strftime('%Y-%m-%d')
+        t_date = t['entry_date']
+        e_date = t['exit_date']
         
         if t['direction'] == 'LONG':
             fig.add_trace(go.Scatter(x=[t_date], y=[t['entry_price']], mode='markers', marker=dict(symbol='triangle-up', size=14, color='#00B852', line=dict(color='white', width=1)), name='Buy Entry', hoverinfo='skip'), row=1, col=1)
@@ -305,19 +331,29 @@ with tab1:
             fig.add_trace(go.Scatter(x=[e_date], y=[t['exit_price']], mode='markers', marker=dict(symbol='x', size=10, color='#FFFFFF'), name='Exit', hoverinfo='skip'), row=1, col=1)
 
     # 3. Volume (Blended Colors)
-    vol_colors = ['#FF5000' if row['Open'] > row['Close'] else '#00B852' for index, row in df.iterrows()]
-    fig.add_trace(go.Bar(x=x_str, y=df['Volume'], marker_color=vol_colors, name="Volume", hoverinfo='y', opacity=0.8), row=2, col=1)
+    if vol_filter_enabled:
+        from engine.indicators import calculate_rvol
+        rvol = calculate_rvol(df['Volume'], vol_lookback)
+        vol_colors = []
+        for (i, row), r_val in zip(df.iterrows(), rvol):
+            if r_val >= vol_threshold:
+                vol_colors.append('#00B852' if row['Open'] <= row['Close'] else '#FF5000')  # Vibrant (Passed)
+            else:
+                vol_colors.append('#4A4A4A')  # Greyed out (Failed filter)
+    else:
+        vol_colors = ['#FF5000' if row['Open'] > row['Close'] else '#00B852' for index, row in df.iterrows()]
+    fig.add_trace(go.Bar(x=x_ax, y=df['Volume'], marker_color=vol_colors, name="Volume", hoverinfo='y', opacity=0.8), row=2, col=1)
 
     # 4. RSI Oscillator
-    fig.add_trace(go.Scatter(x=x_str, y=rsi_series, name=f"RSI ({rsi_len})", line=dict(color='#A371F7', width=1.5), hoverinfo='y'), row=3, col=1)
+    fig.add_trace(go.Scatter(x=x_ax, y=rsi_series, name=f"RSI ({rsi_len})", line=dict(color='#A371F7', width=1.5), hoverinfo='y'), row=3, col=1)
     fig.add_hline(y=rsi_upper, line=dict(color='#F85149', width=1, dash='dash'), row=3, col=1)
     fig.add_hline(y=rsi_lower, line=dict(color='#2EA043', width=1, dash='dash'), row=3, col=1)
     # Add light fill between boundaries (Optional clean styling)
     fig.add_hrect(y0=rsi_lower, y1=rsi_upper, fillcolor="rgba(163,113,247,0.1)", layer="below", line_width=0, row=3, col=1)
 
     # 5. Equity Curve
-    fig.add_trace(go.Scatter(x=x_str, y=result_df['Portfolio_Value'], name="Strategy Equity", line=dict(color='#3772FF', width=2), fill='tozeroy', fillcolor='rgba(55, 114, 255, 0.1)', hoverinfo='y'), row=4, col=1)
-    fig.add_trace(go.Scatter(x=x_str, y=result_df['BH_Value'], name="Buy & Hold", line=dict(color='#8B949E', width=1.5, dash='dot'), hoverinfo='skip'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_ax, y=result_df['Portfolio_Value'], name="Strategy Equity", line=dict(color='#3772FF', width=2), fill='tozeroy', fillcolor='rgba(55, 114, 255, 0.1)', hoverinfo='y'), row=4, col=1)
+    fig.add_trace(go.Scatter(x=x_ax, y=result_df['BH_Value'], name="Buy & Hold", line=dict(color='#8B949E', width=1.5, dash='dot'), hoverinfo='skip'), row=4, col=1)
 
     # Layout & Groww Navigation Mechanics
     fig.update_layout(
@@ -334,7 +370,7 @@ with tab1:
     
     # Crosshairs & Axis styling
     fig.update_xaxes(
-        type='category', nticks=10,  # Forces gapless chart, limits text overlap
+        rangebreaks=[dict(bounds=["sat", "mon"])],  # Hides weekends natively while preserving datetime zooming
         gridcolor='rgba(43,49,57,0.3)', tickfont=dict(color='#8B949E'),
         showspikes=True, spikemode='across', spikethickness=1, spikedash='dot', spikecolor='#E6EDF3'
     )
@@ -454,7 +490,10 @@ with tab4:
                     fast_ma=fast_ma, slow_ma=slow_ma, rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
                     rsi_lower=rsi_lower, rsi_upper=rsi_upper,
                     tsl_enabled=tsl_enabled, tsl_pct=tsl_pct,
-                    execution_mode=execution_mode
+                    execution_mode=execution_mode,
+                    vol_filter_enabled=vol_filter_enabled,
+                    vol_lookback=vol_lookback,
+                    vol_threshold=vol_threshold
                 )
                 
                 if opt_res["ok"]:
@@ -533,3 +572,240 @@ with tab4:
             st.plotly_chart(fig_hm, use_container_width=True)
         else:
             st.info("Run the optimizer to view the heatmap matrix.")
+
+# ─────────────────────────────────────────────────────────────
+#  TAB 5: FUTURE TESTING (WALK-FORWARD OPTIMIZATION)
+# ─────────────────────────────────────────────────────────────
+with tab5:
+    st.markdown("### 🔮 Institutional Future Testing (WFO)")
+    st.markdown("Prove your strategy survives the future by simulating a rolling walk-forward optimization.")
+    
+    with st.expander("📖 What is Walk-Forward Optimization? (Simple Explanation)"):
+        st.markdown("""
+        **The Problem with normal Backtesting (Curve Fitting)**
+        If you let the computer look at all 5 years of data at once, it acts like a student who memorized the answer key. It will perfectly match the past, but usually fails in the real world tomorrow because it didn't learn true market logic.
+        
+        **The Solution: The Blind Test (Walk-Forward)**
+        Walk-Forward Optimization forces the algorithm to prove its worth by taking the test **blind**, just like real trading.
+        
+        *   **Step 1 (The Training):** We hide the year 2024. We tell the engine to find the best parameters using only 2020-2023. Let's say it finds the 15 & 40 MA.
+        *   **Step 2 (The Blind Test):** We lock the strategy at 15 & 40 MA, and force it to trade on 2024 (data it has never seen).
+        
+        **Rolling Windows**
+        We do this multiple times to simulate a trader re-optimizing their system every year:
+        *   **Window 1:** Train on 2020-2021 ➔ Trade blindly on **2022**.
+        *   **Window 2:** Train on 2021-2022 ➔ Trade blindly on **2023**.
+        *   **Window 3:** Train on 2022-2023 ➔ Trade blindly on **2024**.
+        
+        Finally, we literally glue the blind trading years (**2022 + 2023 + 2024**) together into one massive master sequence. **The Equity Curve you see below is a pure simulation of you trading completely blind over 3 years.**
+        """)
+    
+    col_wfo1, col_wfo2, col_wfo3, col_wfo4, col_wfo5 = st.columns([1, 1, 1, 1.2, 1.5])
+    with col_wfo1:
+        wfo_windows = st.number_input("Rolling Windows", min_value=1, max_value=10, value=3, help="How many times the engine should step forward and re-optimize.")
+    with col_wfo2:
+        wfo_split = st.slider("Training Split (%)", min_value=50, max_value=90, value=70, help="Percentage of data in each window used for blind training.")
+    with col_wfo3:
+        wfo_opt_target = st.selectbox("WFO Target", ["Optimize MAs", "Optimize TSL Only (1D)", "No Optimization (Use Sidebar MAs)"], help="What the engine should optimize in the past.")
+    with col_wfo4:
+        wfo_opt_mode = st.selectbox("Grid Resolution", ["Fast Scan (5 increments)", "Deep Scan (1 increments)"], help="Deep Scan takes much longer but finds mathematically perfect numbers.")
+    with col_wfo5:
+        st.markdown("<br>", unsafe_allow_html=True)
+        run_wfo = st.button("🚀 Run Walk-Forward", use_container_width=True)
+
+    st.markdown("---")
+    
+    wfo_results_container = st.container()
+    
+    with wfo_results_container:
+        if run_wfo:
+            with st.spinner("Executing Institutional Walk-Forward Optimization... (This may take a moment)"):
+                total_bars = len(df)
+                oos_total_size = int(total_bars * (1.0 - wfo_split / 100.0))
+                oos_chunk_size = oos_total_size // wfo_windows
+                
+                master_oos_trades = []
+                master_oos_equity = []
+                wfo_history = []
+                
+                progress_bar = st.progress(0)
+                
+                for i in range(wfo_windows):
+                    train_start = 0
+                    train_end = total_bars - oos_total_size + i * oos_chunk_size
+                    test_start = train_end
+                    test_end = test_start + oos_chunk_size if i < wfo_windows - 1 else total_bars
+                    
+                    df_in = df.iloc[train_start:train_end]
+                    df_out = df.iloc[test_start:test_end]
+                    
+                    # 1. Blind Optimization on df_in
+                    actual_mode = "deep" if "Deep" in wfo_opt_mode else "fast"
+                    
+                    if wfo_opt_target == "Optimize MAs":
+                        max_lookback = 200
+                    else:
+                        max_lookback = max(fast_len, slow_len)
+                        
+                    if len(df_in) < max_lookback + 10:
+                        st.error(f"**Data Starvation Error in Window {i+1}:** Training data ({len(df_in)} bars) is too small to calculate a {max_lookback}-period moving average. Please use a larger dataset (change Start Date) or a smaller timeframe (like 15m).")
+                        st.stop()
+                    
+                    if wfo_opt_target == "No Optimization (Use Sidebar MAs)":
+                        in_bt = run_backtest(
+                            df_in, fast_ma.iloc[train_start:train_end], slow_ma.iloc[train_start:train_end],
+                            direction, capital, brokerage, optimize=True,
+                            rsi_series=rsi_series.iloc[train_start:train_end] if rsi_series is not None else None,
+                            strategy_mode=strategy_mode, rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
+                            rsi_upper=rsi_upper, rsi_lower=rsi_lower,
+                            tsl_enabled=tsl_enabled, tsl_pct=tsl_pct, execution_mode=execution_mode,
+                            vol_filter_enabled=vol_filter_enabled, vol_lookback=vol_lookback,
+                            vol_threshold=vol_threshold, max_lookback=max_lookback
+                        )
+                        final_val = in_bt["data"]["Portfolio_Value"].iloc[-1] if in_bt["ok"] and in_bt["data"] is not None else capital
+                        ret = ((final_val - capital) / capital) * 100
+                        opt_res = {
+                            "ok": True,
+                            "best": {
+                                "y_val": fast_len,
+                                "x_val": slow_len,
+                                "z_val": tsl_pct if tsl_enabled else None,
+                                "return": ret
+                            }
+                        }
+                    else:
+                        opt_res = run_optimization(
+                            df_in, ma_type=ma_type, mode=actual_mode, initial_capital=capital,
+                            brokerage_per_trade=brokerage, direction=direction,
+                            opt_target=wfo_opt_target, strategy_mode=strategy_mode,
+                            fast_ma=fast_ma.iloc[train_start:train_end], slow_ma=slow_ma.iloc[train_start:train_end],
+                            rsi_series=rsi_series.iloc[train_start:train_end], rsi_lower=rsi_lower, rsi_upper=rsi_upper,
+                            tsl_enabled=tsl_enabled, tsl_pct=tsl_pct, execution_mode=execution_mode,
+                            vol_filter_enabled=vol_filter_enabled, vol_lookback=vol_lookback, vol_threshold=vol_threshold,
+                            max_lookback=max_lookback
+                        )
+                    
+                    if not opt_res["ok"]:
+                        st.error(f"Optimization failed in Window {i+1}: {opt_res['error']}")
+                        st.stop()
+                        
+                    b = opt_res['best']
+                    best_fast = b.get('y_val', fast_len) if wfo_opt_target == "Optimize MAs" else fast_len
+                    best_slow = b.get('x_val', slow_len) if wfo_opt_target == "Optimize MAs" else slow_len
+                    best_tsl = b.get('z_val', tsl_pct)
+                    
+                    is_days = (df_in.index[-1] - df_in.index[0]).days
+                    is_days = max(1, is_days)
+                    is_cagr = (((1 + b['return']/100.0) ** (365.0 / is_days)) - 1) * 100.0
+                    
+                    # 2. Blind Execution on df_out
+                    from engine.indicators import get_indicator
+                    if "MA" in strategy_mode and wfo_opt_target == "Optimize MAs":
+                        oos_fast_ma = get_indicator(df, ma_type, best_fast)
+                        oos_slow_ma = get_indicator(df, ma_type, best_slow)
+                    else:
+                        oos_fast_ma = fast_ma
+                        oos_slow_ma = slow_ma
+                        
+                    out_bt = run_backtest(
+                        df_out, oos_fast_ma.loc[df_out.index], oos_slow_ma.loc[df_out.index],
+                        direction, capital, brokerage, optimize=False,
+                        rsi_series=rsi_series.loc[df_out.index], strategy_mode=strategy_mode,
+                        rsi_buy_rule=rsi_buy_rule, rsi_sell_rule=rsi_sell_rule,
+                        rsi_upper=rsi_upper, rsi_lower=rsi_lower,
+                        tsl_enabled=tsl_enabled if best_tsl is None else True, 
+                        tsl_pct=best_tsl if best_tsl is not None else tsl_pct,
+                        execution_mode=execution_mode,
+                        vol_filter_enabled=vol_filter_enabled, vol_lookback=vol_lookback, vol_threshold=vol_threshold
+                    )
+                    
+                    oos_cagr_window = 0.0
+                    if out_bt["ok"]:
+                        master_oos_trades.extend(out_bt["trades"])
+                        master_oos_equity.append(out_bt["data"]['Strategy_Return'])
+                        
+                        window_ret = out_bt["data"]["Strategy_Return"]
+                        if len(window_ret) > 0:
+                            oos_capital_window = capital
+                            for ret in window_ret:
+                                oos_capital_window *= (1 + ret)
+                            
+                            oos_window_days = max(1, (window_ret.index[-1] - window_ret.index[0]).days)
+                            oos_cagr_window = (((oos_capital_window / capital) ** (365.0 / oos_window_days)) - 1) * 100.0
+
+                    wfo_history.append({
+                        'Window': f"#{i+1}",
+                        'Training Dates': f"{df_in.index[0].strftime('%Y-%m-%d')} to {df_in.index[-1].strftime('%Y-%m-%d')}",
+                        'Blind Test Dates': f"{df_out.index[0].strftime('%Y-%m-%d')} to {df_out.index[-1].strftime('%Y-%m-%d')}",
+                        'Best Fast': best_fast,
+                        'Best Slow': best_slow,
+                        'Best TSL': f"{best_tsl}%" if best_tsl else "OFF",
+                        'Training Profit (Yearly)': f"{round(is_cagr, 2)}%",
+                        'Blind Test Profit (Yearly)': f"{round(oos_cagr_window, 2)}%",
+                        '_is_cagr_raw': is_cagr
+                    })
+                    
+                    progress_bar.progress((i + 1) / wfo_windows)
+                    
+                st.session_state['wfo_history'] = wfo_history
+                st.session_state['wfo_trades'] = master_oos_trades
+                st.session_state['wfo_returns'] = pd.concat(master_oos_equity) if master_oos_equity else pd.Series()
+                st.session_state['wfo_avg_is_cagr'] = sum([h['_is_cagr_raw'] for h in wfo_history]) / wfo_windows if wfo_windows > 0 else 0
+                st.success("Walk-Forward Optimization Complete!")
+                
+        # ── RENDER DASHBOARDS (STEP 4) ──
+        if 'wfo_history' in st.session_state and len(st.session_state['wfo_history']) > 0:
+            hist = st.session_state['wfo_history']
+            master_trades = st.session_state['wfo_trades']
+            master_returns = st.session_state['wfo_returns']
+            avg_is_cagr = st.session_state.get('wfo_avg_is_cagr', 0.0)
+            
+            # Reconstruct Equity Curve
+            oos_capital = capital
+            oos_equity_curve = [oos_capital]
+            for ret in master_returns:
+                oos_capital = oos_capital * (1 + ret)
+                oos_equity_curve.append(oos_capital)
+                
+            if len(master_returns) > 0:
+                oos_days = (master_returns.index[-1] - master_returns.index[0]).days
+                oos_days = max(1, oos_days)
+                oos_cagr = (((oos_equity_curve[-1] / capital) ** (365.0 / oos_days)) - 1) * 100.0
+            else:
+                oos_cagr = 0.0
+            
+            # WFE & Monte Carlo
+            wfe = (oos_cagr / avg_is_cagr) * 100 if avg_is_cagr > 0 else 0.0
+            
+            from engine.analytics import run_monte_carlo
+            mc_worst_dd = run_monte_carlo(master_trades, capital, iterations=1000)
+            
+            st.markdown("### 1. Parameter Stability & WFO History")
+            display_hist = pd.DataFrame(hist).drop(columns=['_is_cagr_raw'], errors='ignore')
+            st.dataframe(display_hist, use_container_width=True)
+            
+            st.markdown("### 2. Institutional Robustness Metrics")
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            
+            with col_m1:
+                wfe_color = "metric-positive" if wfe > 50 else "metric-negative"
+                st.markdown(metric_card("Walk-Forward Efficiency", f"{wfe:.1f}%", wfe_color), unsafe_allow_html=True)
+            with col_m2:
+                st.markdown(metric_card("Avg Training Profit (Yearly)", f"{avg_is_cagr:.1f}%", "metric-positive" if avg_is_cagr>0 else "metric-negative"), unsafe_allow_html=True)
+            with col_m3:
+                st.markdown(metric_card("Blind Test Profit (Yearly)", f"{oos_cagr:.1f}%", "metric-positive" if oos_cagr>0 else "metric-negative"), unsafe_allow_html=True)
+            with col_m4:
+                st.markdown(metric_card("Monte Carlo Worst DD", f"{mc_worst_dd:.1f}%", "metric-negative"), unsafe_allow_html=True)
+                
+            st.markdown("### 3. Out-Of-Sample Master Equity Curve")
+            fig_oos = px.line(x=master_returns.index, y=oos_equity_curve[1:], labels={"x": "Date", "y": "Portfolio Value"})
+            fig_oos.update_traces(line=dict(color='#00B852', width=2), fill='tozeroy', fillcolor='rgba(0, 184, 82, 0.1)')
+            fig_oos.update_layout(
+                height=400, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor='#0B0E14', plot_bgcolor='#0B0E14', font=dict(color='#E6EDF3')
+            )
+            st.plotly_chart(fig_oos, use_container_width=True)
+            
+        else:
+            if not run_wfo:
+                st.caption("Configure parameters and run the Future Test to generate institutional robustness analytics.")

@@ -93,6 +93,16 @@ def calculate_rsi(series: pd.Series, length: int) -> pd.Series:
     
     return pd.Series(rsi, index=series.index)
 
+def calculate_rvol(volume: pd.Series, length: int) -> pd.Series:
+    """Relative Volume (RVOL): ratio of current volume to its N-period SMA."""
+    if len(volume) < length:
+        return pd.Series(1.0, index=volume.index)
+        
+    avg_vol = volume.rolling(window=length, min_periods=1).mean()
+    # Avoid division by zero by replacing 0 with small epsilon, or fillna
+    rvol = (volume / avg_vol.replace(0, np.nan)).fillna(0)
+    return rvol
+
 def get_indicator(df: pd.DataFrame, ma_type: str, length: int) -> pd.Series:
     """Master Routing Function"""
     ma_type = ma_type.upper()

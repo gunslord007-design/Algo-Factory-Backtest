@@ -14,6 +14,7 @@ Risk-Free Rate: 6.5% annualized (India 10-Year Govt Bond Yield)
 
 import pandas as pd
 import numpy as np
+import random
 
 RISK_FREE_RATE = 0.065  # 6.5% annualized (India benchmark)
 TRADING_DAYS_PER_YEAR = 252
@@ -343,3 +344,42 @@ def compute_full_analytics(
             'initial_capital': initial_capital,
         }
     }
+
+# ─────────────────────────────────────────────────────────────
+#  MONTE CARLO SIMULATION
+# ─────────────────────────────────────────────────────────────
+
+def run_monte_carlo(trades: list, initial_capital: float, iterations: int = 1000) -> float:
+    """
+    Simulates randomized trade sequence permutations to calculate
+    the absolute Worst Case Maximum Drawdown.
+    """
+    if not trades or initial_capital <= 0:
+        return 0.0
+
+    # Extract percentage returns (decimal format)
+    returns = [t['return_pct'] / 100.0 for t in trades]
+    worst_mdd = 0.0
+
+    for _ in range(iterations):
+        shuffled = returns.copy()
+        random.shuffle(shuffled)
+        
+        peak = initial_capital
+        current = initial_capital
+        max_dd = 0.0
+        
+        for ret in shuffled:
+            current = current * (1 + ret)
+            if current > peak:
+                peak = current
+            else:
+                dd = (current - peak) / peak
+                if dd < max_dd:
+                    max_dd = dd
+                    
+        if max_dd < worst_mdd:
+            worst_mdd = max_dd
+
+    return round(worst_mdd * 100, 2)
+

@@ -49,7 +49,9 @@ def detect_crossovers(fast_ma: pd.Series, slow_ma: pd.Series) -> pd.DataFrame:
 def generate_positions(
     crossovers: pd.DataFrame, 
     direction: str = "Both",
-    strategy_mode: str = "MA Crossover"
+    strategy_mode: str = "MA Crossover",
+    volume_filter: pd.Series = None,
+    max_lookback: int = 0
 ) -> pd.Series:
     """
     Converts signals into a position series using highly optimized vectorized logic.
@@ -76,14 +78,41 @@ def generate_positions(
         buy_trigger = gc & rsi_buy
         sell_trigger = dc | rsi_sell  # Sell if either safety condition hits
 
-    if direction == "Long Only":
-        signals = np.where(buy_trigger, 1, np.where(sell_trigger, 0, np.nan))
-    elif direction == "Short Only":
-        signals = np.where(sell_trigger, -1, np.where(buy_trigger, 0, np.nan))
-    else:  # Both directions
-        signals = np.where(buy_trigger, 1, np.where(sell_trigger, -1, np.nan))
+    # Apply Volume Filter if provided (gates ONLY entries, not exits)
+    if volume_filter is not None:
+        entry_long = buy_trigger & volume_filter
+        exit_long = sell_trigger  # Exit without volume restriction
+        entry_short = sell_trigger & volume_filter
+        exit_short = buy_trigger  # Exit without volume restriction
+    else:
+        entry_long = buy_trigger
+        exit_long = sell_trigger
+        entry_short = sell_trigger
+        exit_short = buy_trigger
 
-    return pd.Series(signals, index=crossovers.index).ffill().fillna(0).astype(int)
+    if direction == "Long Only":
+        signals = np.where(entry_long, 1, np.where(exit_long, 0, np.nan))
+    elif direction == "Short Only":
+        signals = np.where(entry_short, -1, np.where(exit_short, 0, np.nan))
+    else:  # Both directions
+        # If entry signal occurs with high volume -> Enter 1 or -1
+        # If exit signal occurs but volume is too low to enter the opposite direction -> Go Flat (0)
+        signals = np.where(
+            entry_long, 1, 
+            np.where(
+                entry_short, -1, 
+                np.where(exit_long | exit_short, 0, np.nan)
+            )
+        )
+
+    signals_series = pd.Series(signals, index=crossovers.index).ffill().fillna(0).astype(int)
+    
+    # ── ENFORCE SYNCHRONIZED STARTING LINE ──
+    # Destroys the "Fake Profit" warm-up bias by blocking all trades before max_lookback
+    if max_lookback > 0 and len(signals_series) > max_lookback:
+        signals_series.iloc[:max_lookback] = 0
+
+    return signals_series
 
 
 def build_trade_log(data: pd.DataFrame, positions: pd.Series, brokerage_per_trade: float = 0.0, initial_capital: float = 100000.0, tsl_pct: float = None, execution_mode: str = "Same Bar Close") -> tuple:
@@ -521,7 +550,11 @@ def run_backtest(
     tsl_enabled: bool = False,
     tsl_pct: float = None,
     execution_mode: str = "Same Bar Close",
-    precomputed_positions: pd.Series = None
+    precomputed_positions: pd.Series = None,
+    vol_filter_enabled: bool = False,
+    vol_lookback: int = 20,
+    vol_threshold: float = 1.5,
+    max_lookback: int = 0
 ) -> dict:
     """
     Master function that orchestrates the entire backtest pipeline.
@@ -608,8 +641,15 @@ def run_backtest(
         crossovers['rsi_buy'] = rsi_buy
         crossovers['rsi_sell'] = rsi_sell
 
+        # ── Step 1c: Calculate Volume Filter ──
+        volume_filter = None
+        if vol_filter_enabled:
+            from engine.indicators import calculate_rvol
+            rvol = calculate_rvol(data['Volume'], vol_lookback)
+            volume_filter = rvol >= vol_threshold
+
         # ── Step 2: Generate positions ──
-        positions = generate_positions(crossovers, direction_clean, strategy_mode)
+        positions = generate_positions(crossovers, direction_clean, strategy_mode, volume_filter=volume_filter, max_lookback=max_lookback)
 
         # ── Next Bar Open: delay all position changes by 1 bar ──
         if execution_mode == "Next Bar Open":

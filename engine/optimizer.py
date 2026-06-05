@@ -40,6 +40,7 @@ def run_optimization(
     brokerage_per_trade: float = 0.0,
     direction: str = "Both",
     progress_callback=None,
+    max_lookback: int = 0,
     **kwargs
 ) -> dict:
     if data is None or data.empty:
@@ -161,7 +162,11 @@ def run_optimization(
                 rsi_lower=rsi_lower,
                 rsi_upper=rsi_upper,
                 tsl_enabled=False,
-                execution_mode=kwargs.get("execution_mode", "Same Bar Close")
+                execution_mode=kwargs.get("execution_mode", "Same Bar Close"),
+                vol_filter_enabled=kwargs.get("vol_filter_enabled", False),
+                vol_lookback=kwargs.get("vol_lookback", 20),
+                vol_threshold=kwargs.get("vol_threshold", 1.5),
+                max_lookback=max_lookback
             )
             base_positions = base_bt.get("positions", None)
 
@@ -192,7 +197,10 @@ def run_optimization(
                     tsl_enabled=tsl_enabled_run,
                     tsl_pct=tsl_pct_run,
                     execution_mode=kwargs.get("execution_mode", "Same Bar Close"),
-                    precomputed_positions=base_positions
+                    precomputed_positions=base_positions,
+                    vol_filter_enabled=kwargs.get("vol_filter_enabled", False),
+                    vol_lookback=kwargs.get("vol_lookback", 20),
+                    vol_threshold=kwargs.get("vol_threshold", 1.5)
                 )
 
                 if bt["ok"] and bt["data"] is not None:
