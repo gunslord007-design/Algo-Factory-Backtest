@@ -198,6 +198,33 @@ execution_mode = st.sidebar.radio("Execution Timing", ["Same Bar Close", "Next B
 
 
 # ── MAIN TERMINAL ──
+with st.expander("🔥 UPCOMING UPDATE: ALGO MODEL HINDI SUMMARY", expanded=True):
+    st.markdown("""
+    ### 🚨 **एक नया मॉडल आ रहा है! (New Model is Coming!)**
+    हम एक बिलकुल नया, एडवांस्ड AI-संचालित मॉडल (Alpha Discovery Engine) लेकर आ रहे हैं जो पुराने इंडिकेटर्स से कहीं आगे की सोचता है। यह मॉडल न्यूज़ और मैक्रो-डेटा को एनालाइज़ करके आपको मार्केट की चाल पहले से ही भांपने में मदद करेगा।
+    
+    ---
+
+    > **नोट (Note):** यह हमारे नए मॉडल का बहुत ही सरल और व्यावहारिक सारांश है, जिसमें किसी भी जटिल फॉर्मूले का उपयोग नहीं किया गया है।
+
+    ### 🛠️ हमारा नया मॉडल कैसे काम करता है?
+    हमारा **Alpha Discovery Engine** दो मुख्य हिस्सों से मिलकर बना है: 
+    1. **Numerical Machine Learning Model** (जो पूरी तरह तैयार है)
+    2. **NLP News-Driven Engine** (आगामी अपडेट)
+
+    #### 1. Numerical Machine Learning Model (संख्यात्मक AI मॉडल)
+    आमतौर पर ट्रेडर्स Moving Averages या RSI देखकर ट्रेड लेते हैं, जो कि "लैगिंग" (पीछे चलने वाले) होते हैं। हमारा AI मॉडल (Random Forest) 50 अलग-अलग इंडिकेटर्स (जैसे India VIX, Crude Oil, US 10Y Yield और Technicals) को एक साथ देखता है और उनके बीच के गहरे पैटर्न्स को समझता है। यह मॉडल न सिर्फ ट्रेंड बताता है बल्कि यह भी समझता है कि कौन सा इंडिकेटर सबसे ज्यादा काम कर रहा है। इसने निफ्टी मिडकैप्स में 70% तक की एक्यूरेसी साबित की है।
+
+    #### 2. NLP News-Driven Engine (न्यूज़ आधारित AI) और Options Logic
+    हर न्यूज़ का मार्केट पर अलग असर होता है। इसलिए हमारा आगामी मॉडल न्यूज़ को 7 पिलर्स के आधार पर एनालाइज़ करेगा (जैसे: क्या न्यूज़ की उम्मीद पहले से थी? न्यूज़ किस सोर्स से आई है? न्यूज़ कितनी तेज़ी से फैल रही है?)। 
+    इसके साथ ही, मॉडल **Options (FnO) Data** जैसे Max Pain और PCR का इस्तेमाल करेगा। अगर वोलैटिलिटी (IV) बहुत ज़्यादा है, तो मॉडल ऑप्शन खरीदने की बजाय 'Credit Spreads' (ऑप्शन सेलिंग) का इस्तेमाल करेगा ताकि टाइम डिके (Theta) का फायदा मिल सके।
+
+    #### 🔋 आगे का रास्ता (Continuous Learning)
+    सोमवार से यह मॉडल **AngelOne WebSocket** के ज़रिए रोज़ाना लाइव डेटा (Tick/Minute data) लेगा। यह हर रोज़ नए डेटा से सीखेगा (Online Incremental Learning) और अपनी प्रेडिक्शन को खुद-ब-खुद और बेहतर बनाएगा।
+
+    **हमसे जुड़े रहें! 🚀 दिन-ब-दिन (day-by-day) हम आपको नई जानकारी और अपडेट्स देते रहेंगे। अगले 5 दिनों में हम इस नए मॉडल के बारे में आगे की पूरी कवरेज और नतीजे आपके साथ साझा करेंगे, इसलिए हमारी प्रोग्रेस पर नज़र बनाए रखें!**
+    """)
+
 st.markdown(f"<h2>{selected_stock_name} ({ticker})</h2>", unsafe_allow_html=True)
 
 with st.spinner("Downloading high-speed market data..."):
@@ -612,9 +639,9 @@ with tab5:
     
     col_wfo1, col_wfo2, col_wfo3 = st.columns(3)
     with col_wfo1:
-        wfo_windows = st.number_input("Window Count", min_value=1, max_value=10, value=3, help="How many times the engine should step forward and re-optimize.")
+        wfo_train_size = st.number_input("Training Size (Bars)", min_value=10, max_value=5000, value=500, help="Exact number of bars to use for historical training.")
     with col_wfo2:
-        wfo_split = st.slider("Training Split (%)", min_value=50, max_value=90, value=70, help="Percentage of data in each window used for blind training.")
+        wfo_test_size = st.number_input("Blind Test Size (Bars)", min_value=5, max_value=2000, value=100, help="Exact number of bars to step forward and trade blindly.")
     with col_wfo3:
         wfo_window_mode = st.selectbox("Window Mode", ["Expanding (Anchored)", "Rolling (Unanchored)"], help="Expanding trains from the beginning. Rolling trains on a fixed trailing chunk.")
 
@@ -637,23 +664,26 @@ with tab5:
         try:
             import plotly.express as px
             
-            # Calculate boundaries identical to the actual execution loop
+            # Calculate boundaries based on explicit train/test sizes
             timeline_total_bars = len(df)
-            timeline_oos_size = int(timeline_total_bars * (1.0 - wfo_split / 100.0))
-            timeline_chunk_size = max(1, timeline_oos_size // wfo_windows)
+            if timeline_total_bars < wfo_train_size + wfo_test_size:
+                st.warning("Not enough data to run WFO. Increase your data range or decrease the Train/Test sizes.")
+                st.stop()
+                
+            wfo_windows = max(1, (timeline_total_bars - wfo_train_size) // wfo_test_size)
+            remainder = (timeline_total_bars - wfo_train_size) % wfo_test_size
             
             timeline_data = []
             
             for i in range(wfo_windows):
-                t_end_idx = timeline_total_bars - timeline_oos_size + i * timeline_chunk_size
+                t_end_idx = wfo_train_size + remainder + (i * wfo_test_size)
                 t_test_start = t_end_idx
-                t_test_end = t_test_start + timeline_chunk_size if i < wfo_windows - 1 else timeline_total_bars
+                t_test_end = t_test_start + wfo_test_size
                 
                 if wfo_window_mode == "Expanding (Anchored)":
                     t_start_idx = 0
                 else:
-                    t_train_window_size = timeline_total_bars - timeline_oos_size
-                    t_start_idx = max(0, t_end_idx - t_train_window_size)
+                    t_start_idx = max(0, t_end_idx - wfo_train_size)
                     
                 t_start_date = df.index[t_start_idx]
                 t_end_date = df.index[t_end_idx - 1] if t_end_idx > 0 else df.index[0]
@@ -696,8 +726,12 @@ with tab5:
         if run_wfo:
             with st.spinner("Executing Institutional Walk-Forward Optimization... (This may take a moment)"):
                 total_bars = len(df)
-                oos_total_size = int(total_bars * (1.0 - wfo_split / 100.0))
-                oos_chunk_size = oos_total_size // wfo_windows
+                if total_bars < wfo_train_size + wfo_test_size:
+                    st.error("Not enough data to run WFO. Increase your data range or decrease the Train/Test sizes.")
+                    st.stop()
+                    
+                wfo_windows = max(1, (total_bars - wfo_train_size) // wfo_test_size)
+                remainder = (total_bars - wfo_train_size) % wfo_test_size
                 
                 master_oos_trades = []
                 master_oos_equity = []
@@ -706,15 +740,14 @@ with tab5:
                 progress_bar = st.progress(0)
                 
                 for i in range(wfo_windows):
-                    train_end = total_bars - oos_total_size + i * oos_chunk_size
+                    train_end = wfo_train_size + remainder + (i * wfo_test_size)
                     test_start = train_end
-                    test_end = test_start + oos_chunk_size if i < wfo_windows - 1 else total_bars
+                    test_end = test_start + wfo_test_size
                     
                     if wfo_window_mode == "Expanding (Anchored)":
                         train_start = 0
                     else:
-                        train_window_size = total_bars - oos_total_size
-                        train_start = max(0, train_end - train_window_size)
+                        train_start = max(0, train_end - wfo_train_size)
                     
                     df_in = df.iloc[train_start:train_end]
                     df_out = df.iloc[test_start:test_end]
@@ -824,9 +857,9 @@ with tab5:
                         'Window': f"#{i+1}",
                         'Training Dates': f"{df_in.index[0].strftime('%Y-%m-%d')} to {df_in.index[-1].strftime('%Y-%m-%d')}",
                         'Blind Test Dates': f"{df_out.index[0].strftime('%Y-%m-%d')} to {df_out.index[-1].strftime('%Y-%m-%d')}",
-                        'Best Fast': best_fast,
-                        'Best Slow': best_slow,
-                        'Best TSL': f"{best_tsl}%" if best_tsl else "OFF",
+                        'Best Fast': "N/A" if wfo_opt_target == "Optimize TSL Only (1D)" else best_fast,
+                        'Best Slow': "N/A" if wfo_opt_target == "Optimize TSL Only (1D)" else best_slow,
+                        'Best TSL': "N/A" if wfo_opt_target == "Optimize MAs" else (f"{best_tsl}%" if best_tsl else "OFF"),
                         'Training Profit (Yearly)': f"{round(is_cagr_val, 2)}%",
                         'Blind Test Profit (Yearly)': f"{round(oos_cagr_val, 2)}%",
                         'OOS Efficiency': f"{round(efficiency, 2)}%",
