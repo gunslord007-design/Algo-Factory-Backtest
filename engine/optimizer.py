@@ -147,6 +147,14 @@ def run_optimization(
                 rsi_lower = kwargs.get('rsi_lower', 30)
                 rsi_upper = kwargs.get('rsi_upper', 70)
 
+            # Dynamically calculate max_lookback to exactly match Terminal tab logic
+            if max_lookback > 0:
+                current_max_lookback = max_lookback
+            elif base_opt == "Optimize MAs":
+                current_max_lookback = max(y_val, x_val)
+            else:
+                current_max_lookback = 0
+
             # Precompute base positions for the current MA/RSI combo to avoid recalculating 
             # them redundantly for every TSL step.
             base_bt = run_backtest(
@@ -166,7 +174,7 @@ def run_optimization(
                 vol_filter_enabled=kwargs.get("vol_filter_enabled", False),
                 vol_lookback=kwargs.get("vol_lookback", 20),
                 vol_threshold=kwargs.get("vol_threshold", 1.5),
-                max_lookback=max_lookback
+                max_lookback=current_max_lookback
             )
             base_positions = base_bt.get("positions", None)
 
@@ -200,7 +208,8 @@ def run_optimization(
                     precomputed_positions=base_positions,
                     vol_filter_enabled=kwargs.get("vol_filter_enabled", False),
                     vol_lookback=kwargs.get("vol_lookback", 20),
-                    vol_threshold=kwargs.get("vol_threshold", 1.5)
+                    vol_threshold=kwargs.get("vol_threshold", 1.5),
+                    max_lookback=current_max_lookback
                 )
 
                 if bt["ok"] and bt["data"] is not None:

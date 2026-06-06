@@ -130,8 +130,19 @@ direction = st.sidebar.radio("Direction", ["Long Only", "Short Only", "Both"], i
 if "MA" in strategy_mode:
     ma_type = st.sidebar.selectbox("Indicator Type", ["SMA", "EMA", "DEMA", "WMA", "HMA", "VWAP"])
     col3, col4 = st.sidebar.columns(2)
-    fast_len = col3.number_input("Fast Length", min_value=1, max_value=500, value=9)
-    slow_len = col4.number_input("Slow Length", min_value=2, max_value=500, value=21)
+    
+    # Surgical fix for Streamlit Numpad Bug: Using text_input and piping through an int converter
+    fast_str = col3.text_input("Fast Length", value="12")
+    try:
+        fast_len = max(1, min(500, int(fast_str)))
+    except ValueError:
+        fast_len = 12
+        
+    slow_str = col4.text_input("Slow Length", value="65")
+    try:
+        slow_len = max(2, min(500, int(slow_str)))
+    except ValueError:
+        slow_len = 65
 else:
     ma_type = "SMA"
     fast_len = 9
@@ -591,27 +602,91 @@ with tab5:
         *   **Step 1 (The Training):** We hide the year 2024. We tell the engine to find the best parameters using only 2020-2023. Let's say it finds the 15 & 40 MA.
         *   **Step 2 (The Blind Test):** We lock the strategy at 15 & 40 MA, and force it to trade on 2024 (data it has never seen).
         
-        **Rolling Windows**
+        **Rolling vs Expanding Windows**
         We do this multiple times to simulate a trader re-optimizing their system every year:
-        *   **Window 1:** Train on 2020-2021 ➔ Trade blindly on **2022**.
-        *   **Window 2:** Train on 2021-2022 ➔ Trade blindly on **2023**.
-        *   **Window 3:** Train on 2022-2023 ➔ Trade blindly on **2024**.
+        *   **Expanding (Anchored):** The algorithm always remembers everything from the very beginning of your data. It builds long-term memory.
+        *   **Rolling (Unanchored):** The algorithm forgets the distant past and only trains on the most recent chunk of data before the blind test. It adapts to new regimes.
         
-        Finally, we literally glue the blind trading years (**2022 + 2023 + 2024**) together into one massive master sequence. **The Equity Curve you see below is a pure simulation of you trading completely blind over 3 years.**
+        Finally, we literally glue all the blind trading years together into one massive master sequence. **The Equity Curve you see below is a pure simulation of you trading completely blind into the future.**
         """)
     
-    col_wfo1, col_wfo2, col_wfo3, col_wfo4, col_wfo5 = st.columns([1, 1, 1, 1.2, 1.5])
+    col_wfo1, col_wfo2, col_wfo3 = st.columns(3)
     with col_wfo1:
-        wfo_windows = st.number_input("Rolling Windows", min_value=1, max_value=10, value=3, help="How many times the engine should step forward and re-optimize.")
+        wfo_windows = st.number_input("Window Count", min_value=1, max_value=10, value=3, help="How many times the engine should step forward and re-optimize.")
     with col_wfo2:
         wfo_split = st.slider("Training Split (%)", min_value=50, max_value=90, value=70, help="Percentage of data in each window used for blind training.")
     with col_wfo3:
-        wfo_opt_target = st.selectbox("WFO Target", ["Optimize MAs", "Optimize TSL Only (1D)", "No Optimization (Use Sidebar MAs)"], help="What the engine should optimize in the past.")
+        wfo_window_mode = st.selectbox("Window Mode", ["Expanding (Anchored)", "Rolling (Unanchored)"], help="Expanding trains from the beginning. Rolling trains on a fixed trailing chunk.")
+
+    col_wfo4, col_wfo5, col_wfo6 = st.columns(3)
     with col_wfo4:
-        wfo_opt_mode = st.selectbox("Grid Resolution", ["Fast Scan (5 increments)", "Deep Scan (1 increments)"], help="Deep Scan takes much longer but finds mathematically perfect numbers.")
+        wfo_opt_target = st.selectbox("WFO Target", ["Optimize MAs", "Optimize TSL Only (1D)", "No Optimization (Use Sidebar MAs)"], help="What the engine should optimize in the past.")
     with col_wfo5:
+        wfo_opt_mode = st.selectbox("Grid Resolution", ["Fast Scan (5 increments)", "Deep Scan (1 increments)"], help="Deep Scan takes much longer but finds mathematically perfect numbers.")
+    with col_wfo6:
         st.markdown("<br>", unsafe_allow_html=True)
         run_wfo = st.button("🚀 Run Walk-Forward", use_container_width=True)
+
+    st.markdown("---")
+    
+    # ── VISUAL WFO TIMELINE (GANTT CHART) ──
+    if len(df) > 0:
+        st.markdown("### 🗺️ Visual WFO Timeline")
+        st.markdown("This map shows exactly how the engine will split your data. **Blue** is the Training (In-Sample) period where the engine learns. **Orange** is the Blind Test (Out-Of-Sample) period where it trades blindly.")
+        
+        try:
+            import plotly.express as px
+            
+            # Calculate boundaries identical to the actual execution loop
+            timeline_total_bars = len(df)
+            timeline_oos_size = int(timeline_total_bars * (1.0 - wfo_split / 100.0))
+            timeline_chunk_size = max(1, timeline_oos_size // wfo_windows)
+            
+            timeline_data = []
+            
+            for i in range(wfo_windows):
+                t_end_idx = timeline_total_bars - timeline_oos_size + i * timeline_chunk_size
+                t_test_start = t_end_idx
+                t_test_end = t_test_start + timeline_chunk_size if i < wfo_windows - 1 else timeline_total_bars
+                
+                if wfo_window_mode == "Expanding (Anchored)":
+                    t_start_idx = 0
+                else:
+                    t_train_window_size = timeline_total_bars - timeline_oos_size
+                    t_start_idx = max(0, t_end_idx - t_train_window_size)
+                    
+                t_start_date = df.index[t_start_idx]
+                t_end_date = df.index[t_end_idx - 1] if t_end_idx > 0 else df.index[0]
+                t_test_start_date = df.index[t_test_start]
+                t_test_end_date = df.index[t_test_end - 1] if t_test_end > 0 else df.index[0]
+                
+                timeline_data.append({
+                    "Window": f"Window {i+1}",
+                    "Phase": "Training (In-Sample)",
+                    "Start": t_start_date,
+                    "End": t_end_date
+                })
+                timeline_data.append({
+                    "Window": f"Window {i+1}",
+                    "Phase": "Blind Test (Out-of-Sample)",
+                    "Start": t_test_start_date,
+                    "End": t_test_end_date
+                })
+                
+            tl_df = pd.DataFrame(timeline_data)
+            fig_tl = px.timeline(
+                tl_df, 
+                x_start="Start", 
+                x_end="End", 
+                y="Window", 
+                color="Phase", 
+                color_discrete_map={"Training (In-Sample)": "#1f77b4", "Blind Test (Out-of-Sample)": "#ff7f0e"}
+            )
+            fig_tl.update_yaxes(autorange="reversed")
+            fig_tl.update_layout(height=250 + (wfo_windows * 30), margin=dict(l=20, r=20, t=20, b=20), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig_tl, use_container_width=True)
+        except Exception as e:
+            st.warning(f"Could not render timeline: {e}")
 
     st.markdown("---")
     
@@ -631,10 +706,15 @@ with tab5:
                 progress_bar = st.progress(0)
                 
                 for i in range(wfo_windows):
-                    train_start = 0
                     train_end = total_bars - oos_total_size + i * oos_chunk_size
                     test_start = train_end
                     test_end = test_start + oos_chunk_size if i < wfo_windows - 1 else total_bars
+                    
+                    if wfo_window_mode == "Expanding (Anchored)":
+                        train_start = 0
+                    else:
+                        train_window_size = total_bars - oos_total_size
+                        train_start = max(0, train_end - train_window_size)
                     
                     df_in = df.iloc[train_start:train_end]
                     df_out = df.iloc[test_start:test_end]
@@ -733,6 +813,13 @@ with tab5:
                             oos_window_days = max(1, (window_ret.index[-1] - window_ret.index[0]).days)
                             oos_cagr_window = (((oos_capital_window / capital) ** (365.0 / oos_window_days)) - 1) * 100.0
 
+                    is_cagr_val = is_cagr if isinstance(is_cagr, (int, float)) else 0.0
+                    oos_cagr_val = oos_cagr_window
+                    
+                    efficiency = 0.0
+                    if is_cagr_val > 0:
+                        efficiency = (oos_cagr_val / is_cagr_val) * 100.0
+
                     wfo_history.append({
                         'Window': f"#{i+1}",
                         'Training Dates': f"{df_in.index[0].strftime('%Y-%m-%d')} to {df_in.index[-1].strftime('%Y-%m-%d')}",
@@ -740,9 +827,12 @@ with tab5:
                         'Best Fast': best_fast,
                         'Best Slow': best_slow,
                         'Best TSL': f"{best_tsl}%" if best_tsl else "OFF",
-                        'Training Profit (Yearly)': f"{round(is_cagr, 2)}%",
-                        'Blind Test Profit (Yearly)': f"{round(oos_cagr_window, 2)}%",
-                        '_is_cagr_raw': is_cagr
+                        'Training Profit (Yearly)': f"{round(is_cagr_val, 2)}%",
+                        'Blind Test Profit (Yearly)': f"{round(oos_cagr_val, 2)}%",
+                        'OOS Efficiency': f"{round(efficiency, 2)}%",
+                        '_is_cagr_raw': is_cagr_val,
+                        '_oos_cagr_raw': oos_cagr_val,
+                        '_efficiency_raw': efficiency
                     })
                     
                     progress_bar.progress((i + 1) / wfo_windows)
@@ -774,28 +864,84 @@ with tab5:
             else:
                 oos_cagr = 0.0
             
-            # WFE & Monte Carlo
+            # ── MASTER OOS METRICS ──
+            if len(master_returns) > 0:
+                import numpy as np
+                mean_ret = master_returns.mean()
+                std_ret = master_returns.std()
+                oos_sharpe = (mean_ret / std_ret) * np.sqrt(252) if std_ret > 0 else 0.0
+                
+                cum_returns = (1 + master_returns).cumprod()
+                peak = cum_returns.cummax()
+                drawdown = (cum_returns - peak) / peak
+                oos_max_dd = drawdown.min() * 100
+                
+                if len(master_trades) > 0:
+                    win_rate = len([t for t in master_trades if t['net_pnl'] > 0]) / len(master_trades) * 100
+                else:
+                    win_rate = 0.0
+            else:
+                oos_sharpe = 0.0
+                oos_max_dd = 0.0
+                win_rate = 0.0
+                
             wfe = (oos_cagr / avg_is_cagr) * 100 if avg_is_cagr > 0 else 0.0
             
+            # ── ROBUSTNESS GRADE LOGIC ──
+            if wfe >= 70 and oos_cagr > 0 and oos_max_dd >= -25:
+                grade = "A"
+                grade_color = "#00B852"
+                grade_desc = "Highly robust. The strategy survives blind testing exceptionally well and is a strong candidate for live trading."
+            elif wfe >= 40 and oos_cagr > 0:
+                grade = "B"
+                grade_color = "#00aaff"
+                grade_desc = "Good robustness. It holds up in blind testing, though expect some performance degradation compared to backtests."
+            elif wfe >= 10 and oos_cagr > 0:
+                grade = "C"
+                grade_color = "#f4a261"
+                grade_desc = "Marginal. The strategy barely survived the blind test. High risk of breaking down in live markets."
+            else:
+                grade = "F"
+                grade_color = "#ff4b4b"
+                grade_desc = "Overfitted / Curve-fit. Do NOT trade this live. The strategy completely fails when exposed to unseen data."
+
             from engine.analytics import run_monte_carlo
             mc_worst_dd = run_monte_carlo(master_trades, capital, iterations=1000)
             
             st.markdown("### 1. Parameter Stability & WFO History")
-            display_hist = pd.DataFrame(hist).drop(columns=['_is_cagr_raw'], errors='ignore')
+            display_hist = pd.DataFrame(hist).drop(columns=['_is_cagr_raw', '_oos_cagr_raw', '_efficiency_raw'], errors='ignore')
             st.dataframe(display_hist, use_container_width=True)
             
             st.markdown("### 2. Institutional Robustness Metrics")
-            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             
+            # Render Grade Box
+            st.markdown(f"""
+            <div style="background-color: rgba(0,0,0,0.2); border-left: 5px solid {grade_color}; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
+                <h3 style="margin: 0; color: {grade_color};">Robustness Grade: {grade}</h3>
+                <p style="margin: 5px 0 0 0; color: #a1a1aa;">{grade_desc}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             with col_m1:
                 wfe_color = "metric-positive" if wfe > 50 else "metric-negative"
                 st.markdown(metric_card("Walk-Forward Efficiency", f"{wfe:.1f}%", wfe_color), unsafe_allow_html=True)
             with col_m2:
-                st.markdown(metric_card("Avg Training Profit (Yearly)", f"{avg_is_cagr:.1f}%", "metric-positive" if avg_is_cagr>0 else "metric-negative"), unsafe_allow_html=True)
+                st.markdown(metric_card("Avg Training Profit", f"{avg_is_cagr:.1f}%", "metric-positive" if avg_is_cagr>0 else "metric-negative"), unsafe_allow_html=True)
             with col_m3:
-                st.markdown(metric_card("Blind Test Profit (Yearly)", f"{oos_cagr:.1f}%", "metric-positive" if oos_cagr>0 else "metric-negative"), unsafe_allow_html=True)
+                st.markdown(metric_card("Blind Test Profit", f"{oos_cagr:.1f}%", "metric-positive" if oos_cagr>0 else "metric-negative"), unsafe_allow_html=True)
             with col_m4:
+                st.markdown(metric_card("Blind Win Rate", f"{win_rate:.1f}%", "metric-neutral"), unsafe_allow_html=True)
+                
+            col_m5, col_m6, col_m7, col_m8 = st.columns(4)
+            with col_m5:
+                st.markdown(metric_card("Blind Sharpe", f"{oos_sharpe:.2f}", "metric-positive" if oos_sharpe>1 else "metric-negative"), unsafe_allow_html=True)
+            with col_m6:
+                st.markdown(metric_card("Blind Max DD", f"{oos_max_dd:.1f}%", "metric-negative"), unsafe_allow_html=True)
+            with col_m7:
                 st.markdown(metric_card("Monte Carlo Worst DD", f"{mc_worst_dd:.1f}%", "metric-negative"), unsafe_allow_html=True)
+            with col_m8:
+                st.empty()
                 
             st.markdown("### 3. Out-Of-Sample Master Equity Curve")
             fig_oos = px.line(x=master_returns.index, y=oos_equity_curve[1:], labels={"x": "Date", "y": "Portfolio Value"})
